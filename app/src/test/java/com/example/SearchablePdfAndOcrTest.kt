@@ -188,5 +188,11 @@ class SearchablePdfAndOcrTest {
     assertTrue(actions.any { it.type == DocumentActionType.EMAIL && it.value == "billing@acme.com" })
     assertTrue(actions.any { it.type == DocumentActionType.URL && it.value == "https://acme.com/pay" })
     assertTrue(actions.any { it.type == DocumentActionType.AMOUNT })
+
+    val libraryTags = SmartScanAdvisor.suggestLibrarySearchTags(
+      listOf(draft.ocrResult!!.formattedText, "Coffee Shop Receipt")
+    )
+    assertTrue(libraryTags.contains("Invoice"))
+    assertTrue(libraryTags.contains("Receipt"))
   }
 }

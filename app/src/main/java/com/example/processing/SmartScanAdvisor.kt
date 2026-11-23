@@ -172,4 +172,39 @@ object SmartScanAdvisor {
 
     return results.take(5)
   }
+
+  fun suggestLibrarySearchTags(ocrTexts: List<String>): List<String> {
+    if (ocrTexts.isEmpty()) return emptyList()
+    val knownCategories = listOf(
+      "Invoice", "Receipt", "Contract", "Report", "Certificate",
+      "Agreement", "Statement", "Tax", "Order", "Resume",
+    )
+    val joined = ocrTexts.joinToString("\n")
+    val matchedCategories = knownCategories.filter { cat ->
+      joined.contains(cat, ignoreCase = true)
+    }.toMutableList()
+
+    if (matchedCategories.size < 4) {
+      val wordCounts = HashMap<String, Int>()
+      val stopWords = setOf(
+        "the", "and", "for", "with", "that", "this", "from", "your", "have",
+        "page", "date", "total", "document", "clearscan", "yang", "dan", "untuk",
+      )
+      Regex("[A-Za-z]{4,14}").findAll(joined).forEach { m ->
+        val word = m.value
+        val lower = word.lowercase(Locale.ROOT)
+        if (lower !in stopWords) {
+          wordCounts[word.replaceFirstChar { it.uppercaseChar() }] =
+            (wordCounts[word.replaceFirstChar { it.uppercaseChar() }] ?: 0) + 1
+        }
+      }
+      wordCounts.entries
+        .sortedByDescending { it.value }
+        .map { it.key }
+        .filter { candidate -> matchedCategories.none { it.equals(candidate, ignoreCase = true) } }
+        .take(5 - matchedCategories.size)
+        .forEach { matchedCategories.add(it) }
+    }
+    return matchedCategories.take(5)
+  }
 }

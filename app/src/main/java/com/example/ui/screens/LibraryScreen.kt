@@ -24,6 +24,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -33,6 +35,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddAPhoto
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DocumentScanner
@@ -51,6 +54,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -81,6 +85,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.R
 import com.example.data.local.ScannedDocumentEntity
+import com.example.processing.SmartScanAdvisor
 import com.example.ui.theme.LocalClearScanColors
 import java.io.File
 import java.util.Date
@@ -247,7 +252,35 @@ fun LibraryScreen(
           ),
         )
 
-        Spacer(Modifier.height(16.dp))
+        val searchSuggestions = remember(documents) {
+          SmartScanAdvisor.suggestLibrarySearchTags(documents.map { it.fullOcrText })
+        }
+        if (searchSuggestions.isNotEmpty()) {
+          Spacer(Modifier.height(10.dp))
+          LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(horizontal = 2.dp),
+          ) {
+            itemsIndexed(searchSuggestions) { idx, tag ->
+              val selected = searchQuery.equals(tag, ignoreCase = true)
+              FilterChip(
+                selected = selected,
+                onClick = { onSearchQueryChange(if (selected) "" else tag) },
+                leadingIcon = {
+                  Icon(
+                    imageVector = Icons.Filled.AutoAwesome,
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                  )
+                },
+                label = { Text(tag) },
+                modifier = Modifier.testTag("library_search_suggestion_$idx"),
+              )
+            }
+          }
+        }
+
+        Spacer(Modifier.height(12.dp))
 
         if (documents.isEmpty() && searchQuery.isBlank()) {
           EmptyLibraryState(
