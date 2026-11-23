@@ -1,0 +1,6 @@
+{
+  "name": "ClearScan",
+  "description": "Batch camera document scanner with on-device OCR, image clarity enhancement, searchable PDF creation, and image/PDF export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

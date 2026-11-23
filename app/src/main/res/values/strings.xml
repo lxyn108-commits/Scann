@@ -1,0 +1,26 @@
+<resources>
+    <string name="app_name">ClearScan</string>
+    <string name="library_title">Documents</string>
+    <string name="library_subtitle">Searchable OCR Archive</string>
+    <string name="search_placeholder">Search across PDFs &amp; OCR text…</string>
+    <string name="empty_library_title">Ready to Digitize</string>
+    <string name="empty_library_body">Scan single pages or multi-page batches with your camera. ClearScan enhances document clarity and embeds an invisible OCR text layer for instant search.</string>
+    <string name="action_start_batch_scan">Batch Scan</string>
+    <string name="action_import_photos">Import Photos</string>
+    <string name="camera_permission_title">Camera Access Needed</string>
+    <string name="camera_permission_body">ClearScan uses your camera to capture sharp document pages in real time. You can also import existing photos without camera access.</string>
+    <string name="action_grant_camera">Allow Camera</string>
+    <string name="batch_review_title">Batch Studio</string>
+    <string name="action_generate_searchable_pdf">Create Searchable PDF</string>
+    <string name="action_add_page">Add Page</string>
+    <string name="action_export_pdf">Save PDF</string>
+    <string name="action_share_pdf">Share PDF</string>
+    <string name="action_export_images">Export Images</string>
+    <string name="action_share_images">Share Images</string>
+    <string name="action_copy_text">Copy OCR Text</string>
+    <string name="ocr_overlay_toggle">OCR Boxes</string>
+    <string name="filter_original">Original</string>
+    <string name="filter_magic_color">Magic Color</string>
+    <string name="filter_crisp_bw">Crisp B&amp;W</string>
+    <string name="filter_grayscale">Grayscale</string>
+</resources>

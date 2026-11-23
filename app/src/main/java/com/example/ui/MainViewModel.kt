@@ -1,0 +1,460 @@
+package com.example.ui
+
+import android.app.Application
+import android.net.Uri
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.data.local.ClearScanDatabase
+import com.example.data.local.DocumentWithPages
+import com.example.data.local.ScannedDocumentEntity
+import com.example.data.repository.ScanRepository
+import com.example.domain.model.DraftPage
+import com.example.domain.model.EnhancementFilter
+import com.example.domain.model.NormalizedCropRect
+import com.example.domain.model.OcrJsonSerializer
+import com.example.domain.model.OcrPageResult
+import com.example.processing.DocumentImageProcessor
+import com.example.processing.ExportManager
+import com.example.processing.PageSuggestion
+import com.example.processing.ScanPreset
+import com.example.processing.SmartScanAdvisor
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+data class BatchReviewUiState(
+  val editingDocumentId: String? = null,
+  val title: String = "",
+  val activePreset: ScanPreset = ScanPreset.DOCUMENT,
+  val pages: List<DraftPage> = emptyList(),
+  val selectedPageIndex: Int = 0,
+  val suggestedTitles: List<String> = emptyList(),
+  val pageSuggestions: Map<String, List<PageSuggestion>> = emptyMap(),
+  val isImportingOrCapturing: Boolean = false,
+  val isSavingPdf: Boolean = false,
+  val processingMessage: String? = null,
+)
+
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+  private val repository: ScanRepository
+
+  init {
+    val db = ClearScanDatabase.getInstance(application)
+    repository = ScanRepository(application.applicationContext, db.scanDao())
+  }
+
+  private val _searchQuery = MutableStateFlow("")
+  val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+  @OptIn(ExperimentalCoroutinesApi::class)
+  val documents: StateFlow<List<ScannedDocumentEntity>> =
+    _searchQuery
+      .flatMapLatest { query -> repository.observeDocuments(query) }
+      .stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList(),
+      )
+
+  private val _batchState = MutableStateFlow(BatchReviewUiState())
+  val batchState: StateFlow<BatchReviewUiState> = _batchState.asStateFlow()
+
+  private val _snackbarMessages = MutableSharedFlow<String>(extraBufferCapacity = 8)
+  val snackbarMessages: SharedFlow<String> = _snackbarMessages.asSharedFlow()
+
+  fun updateSearchQuery(query: String) {
+    _searchQuery.value = query
+  }
+
+  fun startNewBatchSession() {
+    val defaultTitle = "Scan ${SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date())}"
+    viewModelScope.launch {
+      repository.discardDraftPages(_batchState.value.pages)
+      _batchState.value = BatchReviewUiState(title = defaultTitle)
+    }
+  }
+
+  fun selectScanPreset(preset: ScanPreset) {
+    _batchState.update { state ->
+      val updatedTitle = if (state.pages.isEmpty() && state.title.startsWith("Scan ")) {
+        "${preset.titlePrefix} ${SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date())}"
+      } else {
+        state.title
+      }
+      state.copy(activePreset = preset, title = updatedTitle)
+    }
+  }
+
+  fun openDocumentForEditing(documentId: String, onReady: () -> Unit) {
+    viewModelScope.launch {
+      val doc = repository.getDocumentWithPages(documentId) ?: return@launch
+      val drafts = doc.pages.sortedBy { it.pageOrder }.map { p ->
+        DraftPage(
+          id = p.id,
+          originalImagePath = p.originalImagePath,
+          enhancedImagePath = p.enhancedImagePath,
+          filter = runCatching { EnhancementFilter.valueOf(p.filterName) }
+            .getOrDefault(EnhancementFilter.MAGIC_COLOR),
+          rotationDegrees = p.rotationDegrees,
+          ocrResult = OcrPageResult(
+            formattedText = p.ocrText,
+            lines = OcrJsonSerializer.decodeLines(p.ocrLinesJson),
+            imageWidth = p.imageWidth,
+            imageHeight = p.imageHeight,
+          ),
+          isProcessing = false,
+        )
+      }
+      _batchState.value = BatchReviewUiState(
+        editingDocumentId = doc.document.id,
+        title = doc.document.title,
+        pages = drafts,
+        selectedPageIndex = 0,
+        suggestedTitles = SmartScanAdvisor.suggestTitles(drafts),
+      )
+      drafts.forEach { refreshSuggestionsForPage(it) }
+      onReady()
+    }
+  }
+
+  fun onPhotoCaptured(tempFile: File) {
+    val presetFilter = _batchState.value.activePreset.filter
+    viewModelScope.launch {
+      _batchState.update {
+        it.copy(isImportingOrCapturing = true, processingMessage = "Enhancing & scanning OCR…")
+      }
+      runCatching {
+        repository.ingestCameraCapture(tempFile, defaultFilter = presetFilter)
+      }.onSuccess { draftPage ->
+        _batchState.update { current ->
+          val nextPages = current.pages + draftPage
+          val suggestedTitle = suggestTitleIfDefault(current.title, nextPages)
+          current.copy(
+            title = suggestedTitle,
+            pages = nextPages,
+            selectedPageIndex = nextPages.lastIndex,
+            suggestedTitles = SmartScanAdvisor.suggestTitles(nextPages),
+            isImportingOrCapturing = false,
+            processingMessage = null,
+          )
+        }
+        refreshSuggestionsForPage(draftPage)
+      }.onFailure { err ->
+        _batchState.update { it.copy(isImportingOrCapturing = false, processingMessage = null) }
+        _snackbarMessages.tryEmit("Capture failed: ${err.localizedMessage ?: "Unknown error"}")
+      }
+    }
+  }
+
+  fun onImportPhotoUris(uris: List<Uri>, onImported: (() -> Unit)? = null) {
+    if (uris.isEmpty()) return
+    val presetFilter = _batchState.value.activePreset.filter
+    viewModelScope.launch {
+      _batchState.update {
+        it.copy(
+          isImportingOrCapturing = true,
+          processingMessage = "Importing ${uris.size} page(s) & running OCR…",
+        )
+      }
+      val newPages = mutableListOf<DraftPage>()
+      for (uri in uris) {
+        val page = runCatching {
+          repository.ingestPhotoPickerUri(uri, defaultFilter = presetFilter)
+        }.getOrNull()
+        if (page != null) newPages.add(page)
+      }
+      if (newPages.isEmpty()) {
+        _batchState.update { it.copy(isImportingOrCapturing = false, processingMessage = null) }
+        _snackbarMessages.tryEmit("Could not read selected image(s).")
+        return@launch
+      }
+      _batchState.update { current ->
+        val nextPages = current.pages + newPages
+        val baseTitle = current.title.ifBlank {
+          "Scan ${SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date())}"
+        }
+        val suggestedTitle = suggestTitleIfDefault(baseTitle, nextPages)
+        current.copy(
+          title = suggestedTitle,
+          pages = nextPages,
+          selectedPageIndex = (nextPages.size - newPages.size).coerceAtLeast(0),
+          suggestedTitles = SmartScanAdvisor.suggestTitles(nextPages),
+          isImportingOrCapturing = false,
+          processingMessage = null,
+        )
+      }
+      newPages.forEach { refreshSuggestionsForPage(it) }
+      onImported?.invoke()
+    }
+  }
+
+  fun updateDraftTitle(title: String) {
+    _batchState.update { it.copy(title = title) }
+  }
+
+  fun selectBatchPage(index: Int) {
+    _batchState.update { state ->
+      if (index in state.pages.indices) state.copy(selectedPageIndex = index) else state
+    }
+  }
+
+  fun removeBatchPage(index: Int) {
+    _batchState.update { state ->
+      if (index !in state.pages.indices) return@update state
+      val next = state.pages.toMutableList().apply { removeAt(index) }
+      val nextIndex = state.selectedPageIndex.coerceAtMost((next.size - 1).coerceAtLeast(0))
+      state.copy(pages = next, selectedPageIndex = nextIndex)
+    }
+  }
+
+  fun moveBatchPage(fromIndex: Int, delta: Int) {
+    _batchState.update { state ->
+      val toIndex = fromIndex + delta
+      if (fromIndex !in state.pages.indices || toIndex !in state.pages.indices) return@update state
+      val next = state.pages.toMutableList()
+      val item = next.removeAt(fromIndex)
+      next.add(toIndex, item)
+      state.copy(pages = next, selectedPageIndex = toIndex)
+    }
+  }
+
+  fun applySuggestion(suggestion: PageSuggestion) {
+    when (suggestion) {
+      is PageSuggestion.ApplyFilter -> applyFilterToSelectedPage(suggestion.filter)
+      is PageSuggestion.AutoTrimBorders -> cropSelectedPage(suggestion.cropRect)
+      is PageSuggestion.RotatePage -> rotateSelectedPage()
+    }
+  }
+
+  fun applyFilterToSelectedPage(filter: EnhancementFilter) {
+    val state = _batchState.value
+    val idx = state.selectedPageIndex
+    val target = state.pages.getOrNull(idx) ?: return
+    if (target.filter == filter || target.isProcessing) return
+
+    viewModelScope.launch {
+      setPageProcessing(target.id, true)
+      val updated = runCatching {
+        repository.reprocessPage(target, filter = filter)
+      }.getOrElse { target.copy(isProcessing = false) }
+      replacePageById(updated)
+      refreshSuggestionsForPage(updated)
+    }
+  }
+
+  fun applyFilterToAllPages(filter: EnhancementFilter) {
+    val state = _batchState.value
+    if (state.pages.isEmpty()) return
+    viewModelScope.launch {
+      _batchState.update {
+        it.copy(isImportingOrCapturing = true, processingMessage = "Applying ${filter.displayName} to batch…")
+      }
+      val updatedList = state.pages.map { page ->
+        runCatching { repository.reprocessPage(page, filter = filter) }.getOrDefault(page)
+      }
+      _batchState.update {
+        it.copy(
+          pages = updatedList,
+          suggestedTitles = SmartScanAdvisor.suggestTitles(updatedList),
+          isImportingOrCapturing = false,
+          processingMessage = null,
+        )
+      }
+      updatedList.forEach { refreshSuggestionsForPage(it) }
+    }
+  }
+
+  fun rotateSelectedPage() {
+    val state = _batchState.value
+    val target = state.pages.getOrNull(state.selectedPageIndex) ?: return
+    if (target.isProcessing) return
+
+    viewModelScope.launch {
+      setPageProcessing(target.id, true)
+      val nextRot = (target.rotationDegrees + 90) % 360
+      val updated = runCatching {
+        repository.reprocessPage(target, rotationDegrees = nextRot)
+      }.getOrElse { target.copy(isProcessing = false) }
+      replacePageById(updated)
+      refreshSuggestionsForPage(updated)
+    }
+  }
+
+  fun cropSelectedPage(cropRect: NormalizedCropRect) {
+    val state = _batchState.value
+    val target = state.pages.getOrNull(state.selectedPageIndex) ?: return
+    if (target.isProcessing || cropRect.isFullImage) return
+
+    viewModelScope.launch {
+      setPageProcessing(target.id, true)
+      val updated = runCatching {
+        repository.reprocessPage(target, cropRect = cropRect)
+      }.getOrElse { target.copy(isProcessing = false) }
+      replacePageById(updated)
+      refreshSuggestionsForPage(updated)
+    }
+  }
+
+  fun saveBatchAsSearchablePdf(onSaved: (String) -> Unit) {
+    val state = _batchState.value
+    if (state.pages.isEmpty() || state.isSavingPdf) return
+
+    viewModelScope.launch {
+      _batchState.update {
+        it.copy(isSavingPdf = true, processingMessage = "Embedding OCR layer into Searchable PDF…")
+      }
+      runCatching {
+        repository.saveBatchDocument(
+          existingDocId = state.editingDocumentId,
+          title = state.title,
+          draftPages = state.pages,
+        )
+      }.onSuccess { docId ->
+        _batchState.value = BatchReviewUiState()
+        _snackbarMessages.tryEmit("Searchable PDF saved (${state.pages.size} page${if (state.pages.size == 1) "" else "s"})")
+        onSaved(docId)
+      }.onFailure { err ->
+        _batchState.update { it.copy(isSavingPdf = false, processingMessage = null) }
+        _snackbarMessages.tryEmit("Failed to create PDF: ${err.localizedMessage ?: "Error"}")
+      }
+    }
+  }
+
+  fun observeDocument(documentId: String): Flow<DocumentWithPages?> =
+    repository.observeDocumentWithPages(documentId)
+
+  fun deleteDocument(documentId: String, onDeleted: (() -> Unit)? = null) {
+    viewModelScope.launch {
+      repository.deleteDocument(documentId)
+      _snackbarMessages.tryEmit("Document deleted")
+      onDeleted?.invoke()
+    }
+  }
+
+  fun exportPdfToUri(pdfPath: String, destinationUri: Uri) {
+    viewModelScope.launch {
+      val file = File(pdfPath)
+      if (!file.exists()) {
+        _snackbarMessages.tryEmit("PDF file not found.")
+        return@launch
+      }
+      ExportManager.writeFileToUri(getApplication(), file, destinationUri)
+        .onSuccess { _snackbarMessages.tryEmit("Searchable PDF saved to device") }
+        .onFailure { _snackbarMessages.tryEmit("Failed to save PDF") }
+    }
+  }
+
+  fun exportTextOnlyPdfToUri(docWithPages: DocumentWithPages, destinationUri: Uri) {
+    viewModelScope.launch {
+      runCatching {
+        val textPdf = repository.generateTextOnlyPdfFile(docWithPages)
+        ExportManager.writeFileToUri(getApplication(), textPdf, destinationUri).getOrThrow()
+      }.onSuccess {
+        _snackbarMessages.tryEmit("Formatted Text PDF saved")
+      }.onFailure {
+        _snackbarMessages.tryEmit("Failed to export Text PDF")
+      }
+    }
+  }
+
+  fun shareSearchablePdf(doc: ScannedDocumentEntity) {
+    val file = File(doc.pdfPath)
+    if (!file.exists()) {
+      _snackbarMessages.tryEmit("PDF file unavailable")
+      return
+    }
+    ExportManager.sharePdf(getApplication(), file, doc.title)
+  }
+
+  fun exportImagesToGallery(docWithPages: DocumentWithPages) {
+    viewModelScope.launch {
+      val files = docWithPages.pages.sortedBy { it.pageOrder }.map { File(it.enhancedImagePath) }
+      ExportManager.exportImagesToGallery(getApplication(), files, docWithPages.document.title)
+        .onSuccess { count ->
+          _snackbarMessages.tryEmit("Saved $count image${if (count == 1) "" else "s"} to Pictures/ClearScan")
+        }
+        .onFailure {
+          _snackbarMessages.tryEmit("Could not save images to Gallery")
+        }
+    }
+  }
+
+  fun sharePageImages(docWithPages: DocumentWithPages, singlePageIndex: Int? = null) {
+    val ordered = docWithPages.pages.sortedBy { it.pageOrder }
+    val files = if (singlePageIndex != null && singlePageIndex in ordered.indices) {
+      listOf(File(ordered[singlePageIndex].enhancedImagePath))
+    } else {
+      ordered.map { File(it.enhancedImagePath) }
+    }
+    ExportManager.shareImages(getApplication(), files, docWithPages.document.title)
+  }
+
+  fun copyOcrText(title: String, text: String) {
+    if (text.isBlank()) {
+      _snackbarMessages.tryEmit("No OCR text to copy")
+      return
+    }
+    ExportManager.copyTextToClipboard(getApplication(), title, text)
+    _snackbarMessages.tryEmit("OCR text copied to clipboard")
+  }
+
+  fun notifyMessage(message: String) {
+    _snackbarMessages.tryEmit(message)
+  }
+
+  private fun setPageProcessing(pageId: String, processing: Boolean) {
+    _batchState.update { state ->
+      state.copy(
+        pages = state.pages.map { if (it.id == pageId) it.copy(isProcessing = processing) else it }
+      )
+    }
+  }
+
+  private fun replacePageById(updated: DraftPage) {
+    _batchState.update { state ->
+      val nextPages = state.pages.map { if (it.id == updated.id) updated else it }
+      state.copy(
+        pages = nextPages,
+        suggestedTitles = SmartScanAdvisor.suggestTitles(nextPages),
+      )
+    }
+  }
+
+  private fun refreshSuggestionsForPage(page: DraftPage) {
+    viewModelScope.launch {
+      val quality = runCatching {
+        DocumentImageProcessor.analyzePageQualityAndBorders(page.originalImagePath)
+      }.getOrNull()
+      val suggestions = SmartScanAdvisor.suggestForPage(page, quality)
+      _batchState.update { state ->
+        state.copy(pageSuggestions = state.pageSuggestions + (page.id to suggestions))
+      }
+    }
+  }
+
+  private fun suggestTitleIfDefault(currentTitle: String, pages: List<DraftPage>): String {
+    val isDefaultPrefix = currentTitle.startsWith("Scan ") ||
+      ScanPreset.entries.any { currentTitle.startsWith("${it.titlePrefix} ") }
+    if (!isDefaultPrefix) return currentTitle
+    val firstLine = pages.firstOrNull()?.ocrResult?.lines?.firstOrNull()?.text?.trim()
+    return if (!firstLine.isNullOrBlank() && firstLine.length in 4..42) {
+      firstLine
+    } else {
+      currentTitle
+    }
+  }
+}
