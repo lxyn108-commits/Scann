@@ -415,12 +415,13 @@ private fun EmptyLibraryState(
 
         Row(
           modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(12.dp),
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
           Button(
             onClick = onStartBatchScan,
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
             modifier = Modifier
-              .weight(1f)
+              .weight(1.1f)
               .height(52.dp)
               .testTag("empty_start_scan_button"),
             shape = RoundedCornerShape(14.dp),
@@ -428,22 +429,33 @@ private fun EmptyLibraryState(
               containerColor = MaterialTheme.colorScheme.primary,
             ),
           ) {
-            Icon(Icons.Filled.AddAPhoto, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text(stringResource(R.string.action_start_batch_scan))
+            Icon(Icons.Filled.AddAPhoto, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(
+              text = stringResource(R.string.action_start_batch_scan),
+              maxLines = 1,
+              softWrap = false,
+              overflow = TextOverflow.Ellipsis,
+            )
           }
 
           FilledTonalButton(
             onClick = onImportClick,
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
             modifier = Modifier
-              .weight(1f)
+              .weight(0.9f)
               .height(52.dp)
               .testTag("empty_import_button"),
             shape = RoundedCornerShape(14.dp),
           ) {
-            Icon(Icons.Filled.PhotoLibrary, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text(stringResource(R.string.action_import_photos))
+            Icon(Icons.Filled.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(
+              text = stringResource(R.string.action_import_photos),
+              maxLines = 1,
+              softWrap = false,
+              overflow = TextOverflow.Ellipsis,
+            )
           }
         }
       }

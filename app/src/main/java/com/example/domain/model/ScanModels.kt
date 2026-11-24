@@ -8,7 +8,7 @@ enum class EnhancementFilter(val displayName: String) {
   ORIGINAL("Tidak ada"),
   MAGIC_COLOR("Warna"),
   CRISP_BW("Hitam putih"),
-  GRAYSCALE("Skala abu-abu"),
+  GRAYSCALE("Abu-abu"),
 }
 
 data class NormalizedPoint(

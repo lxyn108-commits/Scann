@@ -65,10 +65,10 @@ class ScanRepository(
     DocumentImageProcessor.saveCameraCaptureOriented(rawTempFile, rawFile)
     rawTempFile.delete()
 
-    val detectedQuad = hintedQuad?.takeIf { it.isConvexValid() } ?: run {
+    val detectedQuad = run {
       val bmp = DocumentImageProcessor.decodeSampledBitmap(rawFile.absolutePath, 320)
       DocumentQuadDetector.detectFromBitmap(bmp).also { bmp.recycle() }
-    } ?: NormalizedQuad.FULL
+    } ?: hintedQuad?.takeIf { it.isConvexValid() } ?: NormalizedQuad.FULL
 
     DocumentImageProcessor.applyPerspectiveCorrection(rawFile, origFile, detectedQuad)
 

@@ -254,4 +254,53 @@ class SearchablePdfAndOcrTest {
     // Cooldown prevents double trigger immediately after auto-capture
     assertFalse(tracker.update(docQuad, 2200L))
   }
+
+  @Test
+  fun documentQuadDetectorHandlesNoisyPatternedCarpetAndOffCenterCard() {
+    val w = 120
+    val h = 160
+    val y = IntArray(w * h)
+    val u = IntArray(w * h)
+    val v = IntArray(w * h)
+
+    // Simulate noisy speckled pink/black patterned carpet (high local speckle variance)
+    for (py in 0 until h) {
+      for (px in 0 until w) {
+        val speckle = ((px * 17 + py * 31) % 7) < 3
+        val idx = py * w + px
+        y[idx] = if (speckle) 24 else 118
+        u[idx] = 114
+        v[idx] = if (speckle) 128 else 166
+      }
+    }
+
+    // Draw an off-center tilted light-blue/white ID card (like KTP in user's screenshot: x=0.33..0.92, y=0.36..0.56)
+    for (py in 0 until h) {
+      val ny = py.toFloat() / h
+      for (px in 0 until w) {
+        val nx = px.toFloat() / w
+        val t = (nx - 0.34f) / 0.56f
+        val topEdge = 0.35f + 0.04f * t
+        val botEdge = 0.54f + 0.04f * t
+        val uSlope = (ny - 0.35f) / 0.19f
+        val leftEdge = 0.34f - 0.02f * uSlope
+        val rightEdge = 0.90f - 0.02f * uSlope
+        if (nx in leftEdge..rightEdge && ny in topEdge..botEdge) {
+          val idx = py * w + px
+          y[idx] = 178
+          u[idx] = 144
+          v[idx] = 112
+        }
+      }
+    }
+
+    val detected = DocumentQuadDetector.detectFromYuvGrid(y, u, v, w, h)
+    assertNotNull("Expected tilted off-center card on patterned rug to be detected", detected)
+    val quad = detected!!
+    assertTrue("Quad must be convex", quad.isConvexValid(minArea = 0.05f))
+    assertTrue("Card left edge should stay near 0.33 (was ${quad.topLeft.x})", abs(quad.topLeft.x - 0.34f) < 0.08f)
+    assertTrue("Card right edge should stay near 0.90 (was ${quad.topRight.x})", abs(quad.topRight.x - 0.89f) < 0.08f)
+    assertTrue("Card top edge should stay near 0.37 (was ${quad.topLeft.y})", abs(quad.topLeft.y - 0.35f) < 0.08f)
+    assertTrue("Card bottom edge should stay near 0.56 (was ${quad.bottomRight.y})", abs(quad.bottomRight.y - 0.58f) < 0.08f)
+  }
 }

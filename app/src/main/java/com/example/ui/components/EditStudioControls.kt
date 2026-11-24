@@ -75,7 +75,7 @@ fun EditStudioActionStrip(
   ) {
     StudioToolItem(
       icon = Icons.Filled.CameraAlt,
-      label = "Ambil\nkembali",
+      label = "Ambil\nulang",
       isActive = false,
       testTag = "tool_retake_button",
       onClick = onRetakePage,
@@ -91,7 +91,7 @@ fun EditStudioActionStrip(
     )
     StudioToolItem(
       icon = Icons.Filled.CropFree,
-      label = "Meluruskan",
+      label = "Luruskan",
       isActive = false,
       testTag = "crop_page_button",
       onClick = onStartStraighten,
@@ -157,6 +157,7 @@ private fun StudioToolItem(
       color = tint,
       textAlign = TextAlign.Center,
       maxLines = 2,
+      softWrap = false,
       overflow = TextOverflow.Ellipsis,
     )
   }

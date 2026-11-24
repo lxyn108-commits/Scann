@@ -12,10 +12,10 @@ enum class ScanPreset(
   val filter: EnhancementFilter,
   val titlePrefix: String,
 ) {
-  DOCUMENT("Document", EnhancementFilter.MAGIC_COLOR, "Document"),
-  RECEIPT("Receipt / ID", EnhancementFilter.CRISP_BW, "Receipt"),
-  NOTES("Notes", EnhancementFilter.GRAYSCALE, "Notes"),
-  COLOR("Color Page", EnhancementFilter.ORIGINAL, "Color Scan"),
+  DOCUMENT("Dokumen", EnhancementFilter.MAGIC_COLOR, "Dokumen"),
+  RECEIPT("Kartu / Struk", EnhancementFilter.CRISP_BW, "Kartu"),
+  NOTES("Catatan", EnhancementFilter.GRAYSCALE, "Catatan"),
+  COLOR("Asli", EnhancementFilter.ORIGINAL, "Scan"),
 }
 
 sealed class PageSuggestion(
@@ -94,11 +94,11 @@ object SmartScanAdvisor {
     val suggestions = mutableListOf<PageSuggestion>()
     val wordCount = page.ocrResult?.lines?.sumOf { it.words.size } ?: 0
 
-    if (quality?.suggestedTrimRect != null) {
+    if (page.quad.isFullImage && quality?.suggestedTrimRect != null) {
       suggestions.add(
         PageSuggestion.AutoTrimBorders(
-          label = "Auto-Trim Borders",
-          reason = "Dark edges detected around page",
+          label = "Rapikan Tepi",
+          reason = "Tepi gelap terdeteksi di sekitar halaman",
           cropRect = quality.suggestedTrimRect,
         )
       )
@@ -109,16 +109,16 @@ object SmartScanAdvisor {
     ) {
       suggestions.add(
         PageSuggestion.ApplyFilter(
-          label = "Apply Crisp B&W",
-          reason = "Low contrast — sharpen text clarity",
+          label = "Coba Hitam Putih",
+          reason = "Kontras rendah — pertajam teks",
           filter = EnhancementFilter.CRISP_BW,
         )
       )
     } else if (page.filter == EnhancementFilter.ORIGINAL) {
       suggestions.add(
         PageSuggestion.ApplyFilter(
-          label = "Boost with Magic Color",
-          reason = "Whiten paper & clarify ink",
+          label = "Tingkatkan Warna",
+          reason = "Putihkan kertas & perjelas teks",
           filter = EnhancementFilter.MAGIC_COLOR,
         )
       )
