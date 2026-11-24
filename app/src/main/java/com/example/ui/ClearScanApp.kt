@@ -77,10 +77,29 @@ fun ClearScanApp(
         batchPages = batchState.pages,
         activePreset = batchState.activePreset,
         isProcessingCapture = batchState.isImportingOrCapturing,
+        isRetakingPage = batchState.retakingPageIndex != null,
         onSelectPreset = mainViewModel::selectScanPreset,
-        onPhotoCaptured = mainViewModel::onPhotoCaptured,
+        onPhotoCaptured = { file, quad, openStudioAfter ->
+          mainViewModel.onPhotoCaptured(
+            tempFile = file,
+            hintedQuad = quad,
+            onCompleted = if (openStudioAfter) {
+              {
+                navController.navigate(ClearScanRoutes.ROUTE_BATCH_REVIEW) {
+                  launchSingleTop = true
+                }
+              }
+            } else {
+              null
+            },
+          )
+        },
         onImportPhotos = { uris ->
-          mainViewModel.onImportPhotoUris(uris)
+          mainViewModel.onImportPhotoUris(uris) {
+            navController.navigate(ClearScanRoutes.ROUTE_BATCH_REVIEW) {
+              launchSingleTop = true
+            }
+          }
         },
         onRemovePage = mainViewModel::removeBatchPage,
         onReviewBatch = {
@@ -88,7 +107,10 @@ fun ClearScanApp(
             launchSingleTop = true
           }
         },
-        onClose = { navController.popBackStack() },
+        onClose = {
+          mainViewModel.clearRetakePage()
+          navController.popBackStack()
+        },
       )
     }
 
@@ -99,12 +121,21 @@ fun ClearScanApp(
         onSelectPage = mainViewModel::selectBatchPage,
         onMovePage = mainViewModel::moveBatchPage,
         onRemovePage = mainViewModel::removeBatchPage,
+        onRetakePage = { index ->
+          mainViewModel.prepareRetakePage(index)
+          navController.navigate(ClearScanRoutes.ROUTE_CAMERA) {
+            launchSingleTop = true
+          }
+        },
         onApplyFilter = mainViewModel::applyFilterToSelectedPage,
         onApplyFilterToAll = mainViewModel::applyFilterToAllPages,
         onApplySuggestion = mainViewModel::applySuggestion,
         onRotatePage = mainViewModel::rotateSelectedPage,
-        onCropPage = mainViewModel::cropSelectedPage,
+        onApplyPerspectiveQuad = mainViewModel::applyPerspectiveToSelectedPage,
+        onToggleShadowRemoval = mainViewModel::toggleShadowRemovalForSelectedPage,
+        onCopyText = mainViewModel::copyOcrText,
         onAddMorePages = {
+          mainViewModel.clearRetakePage()
           navController.navigate(ClearScanRoutes.ROUTE_CAMERA) {
             launchSingleTop = true
           }

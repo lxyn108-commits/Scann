@@ -5,10 +5,97 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
 enum class EnhancementFilter(val displayName: String) {
-  ORIGINAL("Original"),
-  MAGIC_COLOR("Magic Color"),
-  CRISP_BW("Crisp B&W"),
-  GRAYSCALE("Grayscale"),
+  ORIGINAL("Tidak ada"),
+  MAGIC_COLOR("Warna"),
+  CRISP_BW("Hitam putih"),
+  GRAYSCALE("Skala abu-abu"),
+}
+
+data class NormalizedPoint(
+  val x: Float,
+  val y: Float,
+)
+
+data class NormalizedQuad(
+  val topLeft: NormalizedPoint,
+  val topRight: NormalizedPoint,
+  val bottomRight: NormalizedPoint,
+  val bottomLeft: NormalizedPoint,
+  val confidence: Float = 1f,
+) {
+  val isFullImage: Boolean
+    get() = topLeft.x <= 0.015f && topLeft.y <= 0.015f &&
+      topRight.x >= 0.985f && topRight.y <= 0.015f &&
+      bottomRight.x >= 0.985f && bottomRight.y >= 0.985f &&
+      bottomLeft.x <= 0.015f && bottomLeft.y >= 0.985f
+
+  fun points(): List<NormalizedPoint> = listOf(topLeft, topRight, bottomRight, bottomLeft)
+
+  fun areaRatio(): Float {
+    val pts = points()
+    var sum = 0f
+    for (i in pts.indices) {
+      val a = pts[i]
+      val b = pts[(i + 1) % pts.size]
+      sum += a.x * b.y - b.x * a.y
+    }
+    return kotlin.math.abs(sum) * 0.5f
+  }
+
+  fun isConvexValid(minArea: Float = 0.06f): Boolean {
+    if (areaRatio() < minArea) return false
+    val pts = points()
+    var sign = 0f
+    for (i in pts.indices) {
+      val p0 = pts[i]
+      val p1 = pts[(i + 1) % 4]
+      val p2 = pts[(i + 2) % 4]
+      val cross = (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x)
+      if (kotlin.math.abs(cross) < 1e-5f) return false
+      if (sign == 0f) {
+        sign = cross
+      } else if (sign * cross <= 0f) {
+        return false
+      }
+    }
+    return true
+  }
+
+  fun maxCornerDelta(other: NormalizedQuad): Float {
+    val a = points()
+    val b = other.points()
+    var maxD = 0f
+    for (i in 0..3) {
+      val d = kotlin.math.hypot(a[i].x - b[i].x, a[i].y - b[i].y)
+      if (d > maxD) maxD = d
+    }
+    return maxD
+  }
+
+  fun lerpTo(target: NormalizedQuad, factor: Float): NormalizedQuad {
+    val t = factor.coerceIn(0f, 1f)
+    fun lp(a: NormalizedPoint, b: NormalizedPoint) = NormalizedPoint(
+      x = a.x + (b.x - a.x) * t,
+      y = a.y + (b.y - a.y) * t,
+    )
+    return NormalizedQuad(
+      topLeft = lp(topLeft, target.topLeft),
+      topRight = lp(topRight, target.topRight),
+      bottomRight = lp(bottomRight, target.bottomRight),
+      bottomLeft = lp(bottomLeft, target.bottomLeft),
+      confidence = confidence + (target.confidence - confidence) * t,
+    )
+  }
+
+  companion object {
+    val FULL = NormalizedQuad(
+      topLeft = NormalizedPoint(0f, 0f),
+      topRight = NormalizedPoint(1f, 0f),
+      bottomRight = NormalizedPoint(1f, 1f),
+      bottomLeft = NormalizedPoint(0f, 1f),
+      confidence = 1f,
+    )
+  }
 }
 
 data class NormalizedCropRect(
@@ -53,6 +140,9 @@ data class DraftPage(
   val rotationDegrees: Int = 0,
   val ocrResult: OcrPageResult? = null,
   val isProcessing: Boolean = false,
+  val rawImagePath: String = originalImagePath,
+  val quad: NormalizedQuad = NormalizedQuad.FULL,
+  val removeShadowAndGlare: Boolean = true,
 )
 
 object OcrJsonSerializer {

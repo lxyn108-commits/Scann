@@ -7,19 +7,26 @@ import com.example.domain.model.OcrJsonSerializer
 import com.example.domain.model.OcrLineBox
 import com.example.domain.model.OcrPageResult
 import com.example.domain.model.OcrWordBox
+import com.example.domain.model.NormalizedPoint
+import com.example.domain.model.NormalizedQuad
 import com.example.processing.DocumentActionType
 import com.example.processing.DocumentImageProcessor
+import com.example.processing.DocumentQuadDetector
 import com.example.processing.OcrEngine
 import com.example.processing.PageSuggestion
+import com.example.processing.QuadStabilityTracker
 import com.example.processing.SearchablePdfGenerator
 import com.example.processing.SearchablePdfPageInput
 import com.example.processing.SmartScanAdvisor
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import kotlin.io.path.createTempDirectory
+import kotlin.math.abs
 
 class SearchablePdfAndOcrTest {
 
@@ -190,9 +197,61 @@ class SearchablePdfAndOcrTest {
     assertTrue(actions.any { it.type == DocumentActionType.AMOUNT })
 
     val libraryTags = SmartScanAdvisor.suggestLibrarySearchTags(
-      listOf(draft.ocrResult!!.formattedText, "Coffee Shop Receipt")
+      listOf(draft.ocrResult.formattedText, "Coffee Shop Receipt")
     )
     assertTrue(libraryTags.contains("Invoice"))
     assertTrue(libraryTags.contains("Receipt"))
+  }
+
+  @Test
+  fun documentQuadDetectorLocatesTiltedDocumentRectangle() {
+    val w = 120
+    val h = 160
+    val luma = IntArray(w * h) { 55 } // dark desk background
+
+    // Draw a bright paper document with slight perspective tilt inside [0.15..0.85, 0.18..0.82]
+    for (y in 0 until h) {
+      val ny = y.toFloat() / h
+      if (ny in 0.20f..0.78f) {
+        val t = (ny - 0.20f) / 0.58f
+        val leftX = ((0.18f - 0.04f * t) * w).toInt()
+        val rightX = ((0.80f + 0.05f * t) * w).toInt()
+        for (x in leftX..rightX) {
+          luma[y * w + x] = 232
+        }
+      }
+    }
+
+    val detected = DocumentQuadDetector.detectFromLumaGrid(luma, w, h)
+    assertNotNull("Expected tilted document quad to be detected", detected)
+    val quad = detected!!
+    assertTrue(quad.isConvexValid())
+    assertTrue("Detected TL.x=${quad.topLeft.x} should be near 0.18", abs(quad.topLeft.x - 0.18f) < 0.09f)
+    assertTrue("Detected TR.x=${quad.topRight.x} should be near 0.80", abs(quad.topRight.x - 0.80f) < 0.09f)
+    assertTrue("Detected TL.y=${quad.topLeft.y} should be near 0.20", abs(quad.topLeft.y - 0.20f) < 0.09f)
+    assertTrue("Detected BL.y=${quad.bottomLeft.y} should be near 0.78", abs(quad.bottomLeft.y - 0.78f) < 0.09f)
+  }
+
+  @Test
+  fun quadStabilityTrackerTriggersAutoCaptureOnlyAfterSteadyHold() {
+    val tracker = QuadStabilityTracker(
+      stabilityWindowMs = 800L,
+      autoCaptureCooldownMs = 2000L,
+      maxCornerDrift = 0.03f,
+    )
+    val docQuad = NormalizedQuad(
+      topLeft = NormalizedPoint(0.15f, 0.20f),
+      topRight = NormalizedPoint(0.85f, 0.20f),
+      bottomRight = NormalizedPoint(0.85f, 0.75f),
+      bottomLeft = NormalizedPoint(0.15f, 0.75f),
+      confidence = 0.9f,
+    )
+
+    assertFalse(tracker.update(docQuad, 1000L))
+    assertFalse(tracker.update(docQuad, 1400L))
+    assertTrue(tracker.stabilityProgress in 0.4f..0.6f)
+    assertTrue(tracker.update(docQuad, 1900L))
+    // Cooldown prevents double trigger immediately after auto-capture
+    assertFalse(tracker.update(docQuad, 2200L))
   }
 }

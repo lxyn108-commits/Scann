@@ -9,9 +9,11 @@ import com.example.data.local.ScannedPageEntity
 import com.example.domain.model.DraftPage
 import com.example.domain.model.EnhancementFilter
 import com.example.domain.model.NormalizedCropRect
+import com.example.domain.model.NormalizedQuad
 import com.example.domain.model.OcrJsonSerializer
 import com.example.domain.model.OcrPageResult
 import com.example.processing.DocumentImageProcessor
+import com.example.processing.DocumentQuadDetector
 import com.example.processing.OcrEngine
 import com.example.processing.SearchablePdfGenerator
 import com.example.processing.SearchablePdfPageInput
@@ -52,20 +54,30 @@ class ScanRepository(
   suspend fun ingestCameraCapture(
     rawTempFile: File,
     defaultFilter: EnhancementFilter = EnhancementFilter.MAGIC_COLOR,
+    hintedQuad: NormalizedQuad? = null,
   ): DraftPage = withContext(Dispatchers.IO) {
     val pageId = UUID.randomUUID().toString()
     val pageDir = File(scansDir, "drafts").apply { mkdirs() }
+    val rawFile = File(pageDir, "${pageId}_raw.jpg")
     val origFile = File(pageDir, "${pageId}_orig.jpg")
     val enhFile = File(pageDir, "${pageId}_enh.jpg")
 
-    DocumentImageProcessor.saveCameraCaptureOriented(rawTempFile, origFile)
+    DocumentImageProcessor.saveCameraCaptureOriented(rawTempFile, rawFile)
     rawTempFile.delete()
+
+    val detectedQuad = hintedQuad?.takeIf { it.isConvexValid() } ?: run {
+      val bmp = DocumentImageProcessor.decodeSampledBitmap(rawFile.absolutePath, 320)
+      DocumentQuadDetector.detectFromBitmap(bmp).also { bmp.recycle() }
+    } ?: NormalizedQuad.FULL
+
+    DocumentImageProcessor.applyPerspectiveCorrection(rawFile, origFile, detectedQuad)
 
     val enhancedBmp = DocumentImageProcessor.generateEnhancedImage(
       originalFile = origFile,
       destEnhancedFile = enhFile,
       filter = defaultFilter,
       rotationDegrees = 0,
+      removeShadowAndGlare = true,
     )
     val ocrResult = runCatching { OcrEngine.recognizeBitmap(enhancedBmp) }.getOrNull()
     val width = enhancedBmp.width
@@ -80,6 +92,9 @@ class ScanRepository(
       rotationDegrees = 0,
       ocrResult = ocrResult ?: OcrPageResult("", emptyList(), width, height),
       isProcessing = false,
+      rawImagePath = rawFile.absolutePath,
+      quad = detectedQuad,
+      removeShadowAndGlare = true,
     )
   }
 
@@ -89,16 +104,25 @@ class ScanRepository(
   ): DraftPage? = withContext(Dispatchers.IO) {
     val pageId = UUID.randomUUID().toString()
     val pageDir = File(scansDir, "drafts").apply { mkdirs() }
+    val rawFile = File(pageDir, "${pageId}_raw.jpg")
     val origFile = File(pageDir, "${pageId}_orig.jpg")
     val enhFile = File(pageDir, "${pageId}_enh.jpg")
 
-    DocumentImageProcessor.importUriToFile(context, uri, origFile) ?: return@withContext null
+    DocumentImageProcessor.importUriToFile(context, uri, rawFile) ?: return@withContext null
+
+    val detectedQuad = run {
+      val bmp = DocumentImageProcessor.decodeSampledBitmap(rawFile.absolutePath, 320)
+      DocumentQuadDetector.detectFromBitmap(bmp).also { bmp.recycle() }
+    } ?: NormalizedQuad.FULL
+
+    DocumentImageProcessor.applyPerspectiveCorrection(rawFile, origFile, detectedQuad)
 
     val enhancedBmp = DocumentImageProcessor.generateEnhancedImage(
       originalFile = origFile,
       destEnhancedFile = enhFile,
       filter = defaultFilter,
       rotationDegrees = 0,
+      removeShadowAndGlare = true,
     )
     val ocrResult = runCatching { OcrEngine.recognizeBitmap(enhancedBmp) }.getOrNull()
     val width = enhancedBmp.width
@@ -113,6 +137,9 @@ class ScanRepository(
       rotationDegrees = 0,
       ocrResult = ocrResult ?: OcrPageResult("", emptyList(), width, height),
       isProcessing = false,
+      rawImagePath = rawFile.absolutePath,
+      quad = detectedQuad,
+      removeShadowAndGlare = true,
     )
   }
 
@@ -121,19 +148,28 @@ class ScanRepository(
     filter: EnhancementFilter = page.filter,
     rotationDegrees: Int = page.rotationDegrees,
     cropRect: NormalizedCropRect? = null,
+    quad: NormalizedQuad? = null,
+    removeShadowAndGlare: Boolean = page.removeShadowAndGlare,
   ): DraftPage = withContext(Dispatchers.IO) {
+    val rawFile = File(page.rawImagePath).takeIf { it.exists() } ?: File(page.originalImagePath)
     val origFile = File(page.originalImagePath)
     val enhFile = File(page.enhancedImagePath)
 
     var nextRotation = rotationDegrees
-    if (cropRect != null && !cropRect.isFullImage) {
-      // Bake current rotation before cropping if needed, or crop directly in current orientation
+    var nextQuad = page.quad
+
+    if (quad != null) {
+      DocumentImageProcessor.applyPerspectiveCorrection(rawFile, origFile, quad)
+      nextQuad = quad
+      nextRotation = 0
+    } else if (cropRect != null && !cropRect.isFullImage) {
       if (nextRotation % 360 != 0) {
         val rotatedTemp = DocumentImageProcessor.generateEnhancedImage(
           originalFile = origFile,
           destEnhancedFile = origFile,
           filter = EnhancementFilter.ORIGINAL,
           rotationDegrees = nextRotation,
+          removeShadowAndGlare = false,
         )
         rotatedTemp.recycle()
         nextRotation = 0
@@ -146,6 +182,7 @@ class ScanRepository(
       destEnhancedFile = enhFile,
       filter = filter,
       rotationDegrees = nextRotation,
+      removeShadowAndGlare = removeShadowAndGlare,
     )
     val ocrResult = runCatching { OcrEngine.recognizeBitmap(enhancedBmp) }.getOrNull()
     val width = enhancedBmp.width
@@ -157,6 +194,8 @@ class ScanRepository(
       rotationDegrees = nextRotation,
       ocrResult = ocrResult ?: OcrPageResult("", emptyList(), width, height),
       isProcessing = false,
+      quad = nextQuad,
+      removeShadowAndGlare = removeShadowAndGlare,
     )
   }
 
@@ -180,6 +219,7 @@ class ScanRepository(
       val targetOrig = File(docFolder, "${draft.id}_orig.jpg")
       val targetEnh = File(docFolder, "${draft.id}_enh.jpg")
 
+      val srcRaw = File(draft.rawImagePath)
       val srcOrig = File(draft.originalImagePath)
       val srcEnh = File(draft.enhancedImagePath)
       if (srcOrig.absolutePath != targetOrig.absolutePath && srcOrig.exists()) {
@@ -189,6 +229,9 @@ class ScanRepository(
       if (srcEnh.absolutePath != targetEnh.absolutePath && srcEnh.exists()) {
         srcEnh.copyTo(targetEnh, overwrite = true)
         srcEnh.delete()
+      }
+      if (srcRaw.absolutePath.contains("/drafts/") && srcRaw.exists()) {
+        srcRaw.delete()
       }
 
       val ocr = draft.ocrResult ?: run {
@@ -278,6 +321,9 @@ class ScanRepository(
 
   suspend fun discardDraftPages(pages: List<DraftPage>) = withContext(Dispatchers.IO) {
     for (page in pages) {
+      if (page.rawImagePath.contains("/drafts/")) {
+        File(page.rawImagePath).delete()
+      }
       if (page.originalImagePath.contains("/drafts/")) {
         File(page.originalImagePath).delete()
       }

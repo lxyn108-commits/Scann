@@ -11,6 +11,7 @@ import com.example.data.repository.ScanRepository
 import com.example.domain.model.DraftPage
 import com.example.domain.model.EnhancementFilter
 import com.example.domain.model.NormalizedCropRect
+import com.example.domain.model.NormalizedQuad
 import com.example.domain.model.OcrJsonSerializer
 import com.example.domain.model.OcrPageResult
 import com.example.processing.DocumentImageProcessor
@@ -42,6 +43,7 @@ data class BatchReviewUiState(
   val activePreset: ScanPreset = ScanPreset.DOCUMENT,
   val pages: List<DraftPage> = emptyList(),
   val selectedPageIndex: Int = 0,
+  val retakingPageIndex: Int? = null,
   val suggestedTitles: List<String> = emptyList(),
   val pageSuggestions: Map<String, List<PageSuggestion>> = emptyMap(),
   val isImportingOrCapturing: Boolean = false,
@@ -131,30 +133,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  fun onPhotoCaptured(tempFile: File) {
-    val presetFilter = _batchState.value.activePreset.filter
+  fun prepareRetakePage(index: Int) {
+    _batchState.update { state ->
+      if (index in state.pages.indices) state.copy(retakingPageIndex = index) else state
+    }
+  }
+
+  fun clearRetakePage() {
+    _batchState.update { it.copy(retakingPageIndex = null) }
+  }
+
+  fun onPhotoCaptured(
+    tempFile: File,
+    hintedQuad: NormalizedQuad? = null,
+    onCompleted: (() -> Unit)? = null,
+  ) {
+    val stateSnapshot = _batchState.value
+    val presetFilter = stateSnapshot.activePreset.filter
+    val retakeIdx = stateSnapshot.retakingPageIndex
     viewModelScope.launch {
       _batchState.update {
-        it.copy(isImportingOrCapturing = true, processingMessage = "Enhancing & scanning OCR…")
+        it.copy(
+          isImportingOrCapturing = true,
+          processingMessage = "Meluruskan & memindai OCR…",
+        )
       }
       runCatching {
-        repository.ingestCameraCapture(tempFile, defaultFilter = presetFilter)
+        repository.ingestCameraCapture(
+          rawTempFile = tempFile,
+          defaultFilter = presetFilter,
+          hintedQuad = hintedQuad,
+        )
       }.onSuccess { draftPage ->
         _batchState.update { current ->
-          val nextPages = current.pages + draftPage
+          val nextPages = if (retakeIdx != null && retakeIdx in current.pages.indices) {
+            current.pages.toMutableList().apply { set(retakeIdx, draftPage) }
+          } else {
+            current.pages + draftPage
+          }
+          val nextSelected = if (retakeIdx != null && retakeIdx in nextPages.indices) {
+            retakeIdx
+          } else {
+            nextPages.lastIndex
+          }
           val suggestedTitle = suggestTitleIfDefault(current.title, nextPages)
           current.copy(
             title = suggestedTitle,
             pages = nextPages,
-            selectedPageIndex = nextPages.lastIndex,
+            selectedPageIndex = nextSelected,
+            retakingPageIndex = null,
             suggestedTitles = SmartScanAdvisor.suggestTitles(nextPages),
             isImportingOrCapturing = false,
             processingMessage = null,
           )
         }
         refreshSuggestionsForPage(draftPage)
+        onCompleted?.invoke()
       }.onFailure { err ->
-        _batchState.update { it.copy(isImportingOrCapturing = false, processingMessage = null) }
+        _batchState.update {
+          it.copy(isImportingOrCapturing = false, processingMessage = null, retakingPageIndex = null)
+        }
         _snackbarMessages.tryEmit("Capture failed: ${err.localizedMessage ?: "Unknown error"}")
       }
     }
@@ -303,6 +341,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       setPageProcessing(target.id, true)
       val updated = runCatching {
         repository.reprocessPage(target, cropRect = cropRect)
+      }.getOrElse { target.copy(isProcessing = false) }
+      replacePageById(updated)
+      refreshSuggestionsForPage(updated)
+    }
+  }
+
+  fun applyPerspectiveToSelectedPage(quad: NormalizedQuad) {
+    val state = _batchState.value
+    val target = state.pages.getOrNull(state.selectedPageIndex) ?: return
+    if (target.isProcessing || !quad.isConvexValid(minArea = 0.04f)) return
+
+    viewModelScope.launch {
+      setPageProcessing(target.id, true)
+      val updated = runCatching {
+        repository.reprocessPage(target, quad = quad)
+      }.getOrElse { target.copy(isProcessing = false) }
+      replacePageById(updated)
+      refreshSuggestionsForPage(updated)
+    }
+  }
+
+  fun toggleShadowRemovalForSelectedPage() {
+    val state = _batchState.value
+    val target = state.pages.getOrNull(state.selectedPageIndex) ?: return
+    if (target.isProcessing) return
+
+    val nextShadowMode = !target.removeShadowAndGlare
+    val nextFilter = if (nextShadowMode && target.filter == EnhancementFilter.ORIGINAL) {
+      EnhancementFilter.MAGIC_COLOR
+    } else {
+      target.filter
+    }
+
+    viewModelScope.launch {
+      setPageProcessing(target.id, true)
+      val updated = runCatching {
+        repository.reprocessPage(
+          page = target,
+          filter = nextFilter,
+          removeShadowAndGlare = nextShadowMode,
+        )
       }.getOrElse { target.copy(isProcessing = false) }
       replacePageById(updated)
       refreshSuggestionsForPage(updated)
