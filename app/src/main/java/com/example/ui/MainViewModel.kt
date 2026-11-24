@@ -278,6 +278,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  fun applyAllSuggestionsForSelectedPage() {
+    val state = _batchState.value
+    val target = state.pages.getOrNull(state.selectedPageIndex) ?: return
+    val suggestions = state.pageSuggestions[target.id].orEmpty()
+    if (suggestions.isEmpty() || target.isProcessing) return
+
+    viewModelScope.launch {
+      setPageProcessing(target.id, true)
+      var working = target
+      var nextFilter = target.filter
+      var nextRotation = target.rotationDegrees
+      var trimRect: com.example.domain.model.NormalizedCropRect? = null
+
+      for (suggestion in suggestions) {
+        when (suggestion) {
+          is PageSuggestion.AutoTrimBorders -> trimRect = suggestion.cropRect
+          is PageSuggestion.RotatePage -> nextRotation = (nextRotation + 90) % 360
+          is PageSuggestion.ApplyFilter -> nextFilter = suggestion.filter
+        }
+      }
+
+      working = runCatching {
+        repository.reprocessPage(
+          page = working,
+          filter = nextFilter,
+          rotationDegrees = nextRotation,
+          cropRect = trimRect,
+        )
+      }.getOrElse { working.copy(isProcessing = false) }
+
+      replacePageById(working)
+      refreshSuggestionsForPage(working)
+    }
+  }
+
   fun applyFilterToSelectedPage(filter: EnhancementFilter) {
     val state = _batchState.value
     val idx = state.selectedPageIndex

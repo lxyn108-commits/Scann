@@ -384,4 +384,143 @@ class SearchablePdfAndOcrTest {
     assertTrue("Top-left Y=${quad.topLeft.y} should be near 0.28", abs(quad.topLeft.y - 0.28f) < 0.07f)
     assertTrue("Bottom-right Y=${quad.bottomRight.y} should be near 0.48 (not tall mat seam!)", abs(quad.bottomRight.y - 0.48f) < 0.07f)
   }
+
+  @Test
+  fun documentQuadDetectorLocksOntoTiltedIdBadgeOnFloralTealSheetAndIgnoresCreamPetal() {
+    val w = 120
+    val h = 160
+    val y = IntArray(w * h)
+    val u = IntArray(w * h)
+    val v = IntArray(w * h)
+
+    // Teal & cream floral bedsheet with curved bottom-right cream petal reaching x=1.0
+    for (py in 0 until h) {
+      val ny = py.toFloat() / h
+      for (px in 0 until w) {
+        val nx = px.toFloat() / w
+        val idx = py * w + px
+        val petalDist = kotlin.math.hypot((nx - 0.85f) * 1.1f, (ny - 0.73f) * 1.4f)
+        val inBottomRightPetal = petalDist < 0.28f && nx >= 0.56f && ny >= 0.56f
+        val inTopLeftPetal = kotlin.math.hypot((nx - 0.14f), (ny - 0.55f)) < 0.16f
+        when {
+          inBottomRightPetal || inTopLeftPetal -> {
+            y[idx] = 188
+            u[idx] = 124
+            v[idx] = 126
+          }
+          else -> {
+            y[idx] = 92
+            u[idx] = 142
+            v[idx] = 104
+          }
+        }
+      }
+    }
+
+    // Black lanyard above card
+    for (py in 0..(0.31f * h).toInt()) {
+      for (px in (0.55f * w).toInt()..(0.66f * w).toInt()) {
+        val idx = py * w + px
+        y[idx] = 30
+        u[idx] = 128
+        v[idx] = 128
+      }
+    }
+
+    // Tilted (-10 deg) ID badge in center: gray plastic frame, sky-blue top, white photo diamond, navy bottom
+    val angle = -0.17f
+    val cosA = kotlin.math.cos(angle)
+    val sinA = kotlin.math.sin(angle)
+    val cx = 0.51f
+    val cy = 0.46f
+    val halfW = 0.21f
+    val halfH = 0.16f
+    for (py in 0 until h) {
+      val ny = py.toFloat() / h
+      for (px in 0 until w) {
+        val nx = px.toFloat() / w
+        val dx = nx - cx
+        val dy = (ny - cy) * (h.toFloat() / w.toFloat())
+        val lx = dx * cosA + dy * sinA
+        val ly = -dx * sinA + dy * cosA
+        val normY = ly / (h.toFloat() / w.toFloat())
+
+        if (abs(lx) <= halfW && abs(normY) <= halfH) {
+          val idx = py * w + px
+          val isPlasticRim = abs(lx) > halfW - 0.025f || abs(normY) > halfH - 0.022f
+          val inDiamond = abs(lx) + abs(normY) < 0.09f
+          val inBottomNavy = normY > 0.02f
+          when {
+            isPlasticRim -> {
+              y[idx] = 152
+              u[idx] = 126
+              v[idx] = 127
+            }
+            inDiamond -> {
+              y[idx] = 205
+              u[idx] = 128
+              v[idx] = 129
+            }
+            inBottomNavy -> {
+              y[idx] = 44
+              u[idx] = 148
+              v[idx] = 118
+            }
+            else -> {
+              y[idx] = 114
+              u[idx] = 156
+              v[idx] = 104
+            }
+          }
+        }
+      }
+    }
+
+    val detected = DocumentQuadDetector.detectFromYuvGrid(y, u, v, w, h)
+    assertNotNull("Expected tilted ID badge on floral teal sheet to be detected", detected)
+    val quad = detected!!
+    val qCenterX = (quad.topLeft.x + quad.topRight.x + quad.bottomRight.x + quad.bottomLeft.x) * 0.25f
+    val qCenterY = (quad.topLeft.y + quad.topRight.y + quad.bottomRight.y + quad.bottomLeft.y) * 0.25f
+    assertTrue("Detected centerX=$qCenterX should be on center ID badge (~0.51), not floral edge", abs(qCenterX - 0.51f) < 0.09f)
+    assertTrue("Detected centerY=$qCenterY should be on center ID badge (~0.46), not bottom petal", abs(qCenterY - 0.46f) < 0.09f)
+  }
+
+  @Test
+  fun quadStabilityTrackerHysteresisPreventsJumpingOnOutliers() {
+    val tracker = QuadStabilityTracker(
+      stabilityWindowMs = 800L,
+      autoCaptureCooldownMs = 2000L,
+      maxCornerDrift = 0.03f,
+      switchConfirmationFrames = 4,
+      acquireConfirmationFrames = 1,
+      jitterDeadband = 0.015f,
+    )
+    val lockedDoc = NormalizedQuad(
+      topLeft = NormalizedPoint(0.25f, 0.28f),
+      topRight = NormalizedPoint(0.75f, 0.28f),
+      bottomRight = NormalizedPoint(0.75f, 0.64f),
+      bottomLeft = NormalizedPoint(0.25f, 0.64f),
+      confidence = 0.8f,
+    )
+    val outlierPetal = NormalizedQuad(
+      topLeft = NormalizedPoint(0.58f, 0.56f),
+      topRight = NormalizedPoint(0.98f, 0.58f),
+      bottomRight = NormalizedPoint(0.98f, 0.85f),
+      bottomLeft = NormalizedPoint(0.55f, 0.80f),
+      confidence = 0.7f,
+    )
+
+    tracker.update(lockedDoc, 1000L)
+    assertNotNull(tracker.smoothedQuad)
+
+    // Micro-jitter inside deadband freezes exact coordinates
+    val microJitter = lockedDoc.copy(topLeft = NormalizedPoint(0.255f, 0.285f))
+    tracker.update(microJitter, 1040L)
+    assertEquals(0.25f, tracker.smoothedQuad!!.topLeft.x, 0.0001f)
+
+    // 2 outlier frames should NOT yank lock away from lockedDoc
+    tracker.update(outlierPetal, 1080L)
+    tracker.update(outlierPetal, 1120L)
+    assertEquals(0.25f, tracker.smoothedQuad!!.topLeft.x, 0.0001f)
+  }
 }

@@ -130,6 +130,7 @@ fun ClearScanApp(
         onApplyFilter = mainViewModel::applyFilterToSelectedPage,
         onApplyFilterToAll = mainViewModel::applyFilterToAllPages,
         onApplySuggestion = mainViewModel::applySuggestion,
+        onApplyAllSuggestions = mainViewModel::applyAllSuggestionsForSelectedPage,
         onRotatePage = mainViewModel::rotateSelectedPage,
         onApplyPerspectiveQuad = mainViewModel::applyPerspectiveToSelectedPage,
         onToggleShadowRemoval = mainViewModel::toggleShadowRemovalForSelectedPage,

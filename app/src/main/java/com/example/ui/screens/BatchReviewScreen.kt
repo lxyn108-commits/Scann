@@ -103,6 +103,7 @@ fun BatchReviewScreen(
   onApplyFilter: (EnhancementFilter) -> Unit,
   onApplyFilterToAll: (EnhancementFilter) -> Unit,
   onApplySuggestion: (PageSuggestion) -> Unit,
+  onApplyAllSuggestions: () -> Unit,
   onRotatePage: () -> Unit,
   onApplyPerspectiveQuad: (NormalizedQuad) -> Unit,
   onToggleShadowRemoval: () -> Unit,
@@ -390,6 +391,27 @@ fun BatchReviewScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(horizontal = 2.dp),
           ) {
+            if (currentSuggestions.size >= 2) {
+              item {
+                AssistChip(
+                  onClick = onApplyAllSuggestions,
+                  leadingIcon = {
+                    Icon(
+                      imageVector = Icons.Filled.AutoAwesome,
+                      contentDescription = null,
+                      modifier = Modifier.size(15.dp),
+                    )
+                  },
+                  label = { Text("Terapkan semua (${currentSuggestions.size})") },
+                  colors = AssistChipDefaults.assistChipColors(
+                    containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
+                    labelColor = Color.White,
+                    leadingIconContentColor = Color.White,
+                  ),
+                  modifier = Modifier.testTag("apply_all_suggestions_chip"),
+                )
+              }
+            }
             itemsIndexed(currentSuggestions) { idx, suggestion ->
               AssistChip(
                 onClick = { onApplySuggestion(suggestion) },
