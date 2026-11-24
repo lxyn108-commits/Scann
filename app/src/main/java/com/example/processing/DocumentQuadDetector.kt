@@ -16,9 +16,10 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Real-time document quadrilateral detector engineered for both cluttered/textured backgrounds
- * (rugs, wood, mats) and clean desks. Combines YUV texture-suppressed foreground segmentation +
- * convex-hull rotating-calipers + 4-side trimmed line fitting, with an oriented thin-edge fallback.
+ * Real-time document quadrilateral detector engineered for both cluttered multi-tone patterned
+ * backgrounds (embossed mats, rugs, wood) and clean desks. Combines multi-patch YUV border-palette
+ * saliency + pure-chroma segmentation + morphological closing + rotating-calipers + 4-side
+ * trimmed line fitting, with a strip-verified multi-channel Hough edge fallback.
  */
 object DocumentQuadDetector {
 
@@ -31,8 +32,9 @@ object DocumentQuadDetector {
   private val COS_TABLE = FloatArray(ANGLES_RAD.size) { cos(ANGLES_RAD[it]) }
   private val SIN_TABLE = FloatArray(ANGLES_RAD.size) { sin(ANGLES_RAD[it]) }
 
-  private data class LineEq(val a: Float, val b: Float, val c: Float) // a*x + b*y = c, unit normal (a, b)
+  private data class LineEq(val a: Float, val b: Float, val c: Float)
   private data class LineCandidate(val theta: Float, val rho: Float, val score: Float, val centerPos: Float)
+  private data class YuvSample(val y: Int, val u: Int, val v: Int)
 
   fun detectFromImageProxy(imageProxy: ImageProxy, targetMaxSide: Int = 128): Pair<NormalizedQuad?, Pair<Int, Int>> {
     val planes = imageProxy.planes
@@ -134,52 +136,136 @@ object DocumentQuadDetector {
   ): NormalizedQuad? {
     if (width < 24 || height < 24 || y.size < width * height) return null
 
-    // 1. Suppress high-frequency background textures (rugs, tiles, embossing) with 2x 3x3 + 1x 5x5 blur
+    // 1. Texture suppression on luma & chroma
     val smoothY = boxBlur3x3(boxBlur3x3(y, width, height), width, height)
-    val featY = boxBlur5x5(smoothY, width, height)
-    val featU = u?.let { boxBlur5x5(boxBlur3x3(it, width, height), width, height) }
-    val featV = v?.let { boxBlur5x5(boxBlur3x3(it, width, height), width, height) }
+    val smoothU = u?.let { boxBlur3x3(it, width, height) }
+    val smoothV = v?.let { boxBlur3x3(it, width, height) }
 
-    // 2. Gradient magnitude on texture-suppressed Y
+    val featY = boxBlur5x5(smoothY, width, height)
+    val featU = smoothU?.let { boxBlur5x5(it, width, height) }
+    val featV = smoothV?.let { boxBlur5x5(it, width, height) }
+
+    // 2. Multi-channel Sobel gradient magnitude (captures iso-luminant color boundaries!)
     val n = width * height
     val gxArr = FloatArray(n)
     val gyArr = FloatArray(n)
     val magArr = FloatArray(n)
+
     for (yy in 1 until height - 1) {
       val ym1 = (yy - 1) * width
       val y0 = yy * width
       val yp1 = (yy + 1) * width
       for (xx in 1 until width - 1) {
-        val tl = smoothY[ym1 + xx - 1]
-        val tc = smoothY[ym1 + xx]
-        val tr = smoothY[ym1 + xx + 1]
-        val ml = smoothY[y0 + xx - 1]
-        val mr = smoothY[y0 + xx + 1]
-        val bl = smoothY[yp1 + xx - 1]
-        val bc = smoothY[yp1 + xx]
-        val br = smoothY[yp1 + xx + 1]
-        val gx = (-tl + tr - 2 * ml + 2 * mr - bl + br).toFloat()
-        val gy = (-tl - 2 * tc - tr + bl + 2 * bc + br).toFloat()
-        val idx = y0 + xx
-        gxArr[idx] = gx
-        gyArr[idx] = gy
-        magArr[idx] = sqrt(gx * gx + gy * gy)
+        val (gxY, gyY) = sobelAt(smoothY, ym1, y0, yp1, xx)
+        val magY = sqrt(gxY * gxY + gyY * gyY)
+
+        if (smoothU != null && smoothV != null) {
+          val (gxU, gyU) = sobelAt(smoothU, ym1, y0, yp1, xx)
+          val (gxV, gyV) = sobelAt(smoothV, ym1, y0, yp1, xx)
+          val magU = sqrt(gxU * gxU + gyU * gyU) * 1.85f
+          val magV = sqrt(gxV * gxV + gyV * gyV) * 1.85f
+          val totalMag = magY + magU + magV
+
+          // Align vector directions to dominant channel so opposing Y/U/V gradients never cancel
+          val (domGx, domGy) = when {
+            magU >= magY && magU >= magV -> gxU to gyU
+            magV >= magY && magV >= magU -> gxV to gyV
+            else -> gxY to gyY
+          }
+          val sY = if (gxY * domGx + gyY * domGy >= 0f) 1f else -1f
+          val sU = if (gxU * domGx + gyU * domGy >= 0f) 1.85f else -1.85f
+          val sV = if (gxV * domGx + gyV * domGy >= 0f) 1.85f else -1.85f
+
+          val idx = y0 + xx
+          gxArr[idx] = gxY * sY + gxU * sU + gxV * sV
+          gyArr[idx] = gyY * sY + gyU * sU + gyV * sV
+          magArr[idx] = totalMag
+        } else {
+          val idx = y0 + xx
+          gxArr[idx] = gxY
+          gyArr[idx] = gyY
+          magArr[idx] = magY
+        }
       }
     }
 
-    // 3. Primary strategy: Region-based segmentation + Convex Hull + 4-side trimmed line fitting
+    // 3. Primary strategy: Multi-patch border palette saliency + pure-chroma mask + convex hull fitting
     val regionQuad = findRegionDocumentQuad(featY, featU, featV, magArr, width, height)
-    if (regionQuad != null && regionQuad.confidence >= 0.45f) {
+    if (regionQuad != null && regionQuad.confidence >= 0.50f) {
       return regionQuad
     }
 
-    // 4. Fallback strategy: Oriented thin-edge Hough quad (for low-contrast paper on light desk)
-    val edgeQuad = findOrientedEdgeQuad(smoothY, gxArr, gyArr, magArr, width, height)
+    // 4. Fallback strategy: Oriented Hough edges + interior bisection & YUV contrast filtering
+    val edgeQuad = findOrientedEdgeQuad(featY, featU, featV, gxArr, gyArr, magArr, width, height)
     return when {
       regionQuad != null && edgeQuad != null ->
         if (regionQuad.confidence >= edgeQuad.confidence) regionQuad else edgeQuad
       else -> regionQuad ?: edgeQuad
     }
+  }
+
+  private fun sobelAt(arr: IntArray, ym1: Int, y0: Int, yp1: Int, xx: Int): Pair<Float, Float> {
+    val tl = arr[ym1 + xx - 1]
+    val tc = arr[ym1 + xx]
+    val tr = arr[ym1 + xx + 1]
+    val ml = arr[y0 + xx - 1]
+    val mr = arr[y0 + xx + 1]
+    val bl = arr[yp1 + xx - 1]
+    val bc = arr[yp1 + xx]
+    val br = arr[yp1 + xx + 1]
+    val gx = (-tl + tr - 2 * ml + 2 * mr - bl + br).toFloat()
+    val gy = (-tl - 2 * tc - tr + bl + 2 * bc + br).toFloat()
+    return gx to gy
+  }
+
+  private fun buildBorderPalette(
+    featY: IntArray,
+    featU: IntArray?,
+    featV: IntArray?,
+    width: Int,
+    height: Int,
+  ): Pair<List<YuvSample>, Int> {
+    val palette = ArrayList<YuvSample>(32)
+    val mx = max(2, (width * 0.045f).roundToInt())
+    val my = max(2, (height * 0.045f).roundToInt())
+
+    fun addSample(x: Int, y: Int) {
+      val ix = x.coerceIn(0, width - 1)
+      val iy = y.coerceIn(0, height - 1)
+      val idx = iy * width + ix
+      val sy = featY[idx]
+      val su = featU?.get(idx) ?: 128
+      val sv = featV?.get(idx) ?: 128
+      // Keep palette deduplicated within small tolerance to stay fast & diverse
+      val duplicate = palette.any {
+        abs(it.y - sy) < 10 && abs(it.u - su) < 6 && abs(it.v - sv) < 6
+      }
+      if (!duplicate) {
+        palette.add(YuvSample(sy, su, sv))
+      }
+    }
+
+    var sumY = 0L
+    var count = 0
+    val topBottomRows = listOf(my, height - 1 - my)
+    for (ry in topBottomRows) {
+      for (step in 0..8) {
+        val x = (width * (0.06f + 0.88f * step / 8f)).roundToInt()
+        addSample(x, ry)
+        sumY += featY[ry.coerceIn(0, height - 1) * width + x.coerceIn(0, width - 1)]
+        count++
+      }
+    }
+    val leftRightCols = listOf(mx, width - 1 - mx)
+    for (rx in leftRightCols) {
+      for (step in 1..7) {
+        val y = (height * (0.12f + 0.76f * step / 8f)).roundToInt()
+        addSample(rx, y)
+        sumY += featY[y.coerceIn(0, height - 1) * width + rx.coerceIn(0, width - 1)]
+        count++
+      }
+    }
+    return palette to (sumY / max(1, count)).toInt()
   }
 
   private fun findRegionDocumentQuad(
@@ -191,55 +277,54 @@ object DocumentQuadDetector {
     height: Int,
   ): NormalizedQuad? {
     val n = width * height
+    val (palette, bgMeanY) = buildBorderPalette(featY, featU, featV, width, height)
 
-    // Sample outer frame border ring to model background color & brightness
-    val borderIndices = ArrayList<Int>(width * 4 + height * 4)
-    val marginX = max(2, (width * 0.06f).toInt())
-    val marginY = max(2, (height * 0.06f).toInt())
-    for (yy in 0 until height) {
-      val ro = yy * width
-      for (xx in 0 until width) {
-        if (yy < marginY || yy >= height - marginY || xx < marginX || xx >= width - marginX) {
-          borderIndices.add(ro + xx)
-        }
-      }
-    }
-    var sumY = 0L
-    var sumU = 0L
-    var sumV = 0L
-    for (idx in borderIndices) {
-      sumY += featY[idx]
-      if (featU != null && featV != null) {
-        sumU += featU[idx]
-        sumV += featV[idx]
-      }
-    }
-    val bCount = max(1, borderIndices.size)
-    val bgY = (sumY / bCount).toInt()
-    val bgU = (sumU / bCount).toInt()
-    val bgV = (sumV / bCount).toInt()
-
-    // Mask A: Background-distance saliency (Y + chroma difference from outer border)
     val distMap = IntArray(n)
-    for (i in 0 until n) {
-      val dy = abs(featY[i] - bgY)
-      val dChroma = if (featU != null && featV != null) {
-        ((abs(featU[i] - bgU) + abs(featV[i] - bgV)) * 0.9f).toInt()
-      } else {
-        0
-      }
-      distMap[i] = (dy + dChroma).coerceIn(0, 255)
-    }
-    val distThresh = max(26, otsuThreshold(distMap))
-    val maskA = BooleanArray(n) { distMap[it] >= distThresh }
+    val chromaDistMap = if (featU != null && featV != null) IntArray(n) else null
 
-    // Mask B: Bright foreground via Otsu on luminance (handles bright paper filling most of frame)
-    val yThresh = max(otsuThreshold(featY), bgY + 18).coerceAtMost(230)
-    val maskB = BooleanArray(n) { featY[it] >= yThresh }
+    for (i in 0 until n) {
+      val py = featY[i]
+      val pu = featU?.get(i) ?: 128
+      val pv = featV?.get(i) ?: 128
+
+      var minYuvDist = Int.MAX_VALUE
+      var minChromaDist = Int.MAX_VALUE
+      for (p in palette) {
+        val dy = abs(py - p.y)
+        val dc = abs(pu - p.u) + abs(pv - p.v)
+        val combined = if (featU != null) {
+          (dy * 0.55f + dc * 1.65f).toInt()
+        } else {
+          dy
+        }
+        if (combined < minYuvDist) minYuvDist = combined
+        if (dc < minChromaDist) minChromaDist = dc
+      }
+      distMap[i] = minYuvDist.coerceIn(0, 255)
+      if (chromaDistMap != null) {
+        chromaDistMap[i] = (minChromaDist * 2).coerceIn(0, 255)
+      }
+    }
+
+    val masks = ArrayList<BooleanArray>(3)
+
+    // Mask A: Minimum YUV distance to any outer-border sample (handles multi-tone patterned mats!)
+    val distThresh = max(24, otsuThreshold(distMap))
+    masks.add(morphologicalClose3x3(BooleanArray(n) { distMap[it] >= distThresh }, width, height))
+
+    // Mask B: Pure chroma separation from border palette (immune to light/shadow & white stripes)
+    if (chromaDistMap != null) {
+      val chromaThresh = max(20, otsuThreshold(chromaDistMap))
+      masks.add(morphologicalClose3x3(BooleanArray(n) { chromaDistMap[it] >= chromaThresh }, width, height))
+    }
+
+    // Mask C: Bright luminance paper threshold (handles white paper on plain gray/dark desks)
+    val yThresh = max(otsuThreshold(featY), bgMeanY + 16).coerceAtMost(230)
+    masks.add(morphologicalClose3x3(BooleanArray(n) { featY[it] >= yThresh }, width, height))
 
     var bestQuad: NormalizedQuad? = null
-    for (mask in listOf(maskA, maskB)) {
-      val candidate = extractBestQuadFromMask(mask, featY, magArr, width, height)
+    for (mask in masks) {
+      val candidate = extractBestQuadFromMask(mask, featY, featU, featV, magArr, width, height)
       if (candidate != null && (bestQuad == null || candidate.confidence > bestQuad.confidence)) {
         bestQuad = candidate
       }
@@ -247,9 +332,57 @@ object DocumentQuadDetector {
     return bestQuad
   }
 
+  private fun morphologicalClose3x3(src: BooleanArray, width: Int, height: Int): BooleanArray {
+    val dilated = BooleanArray(src.size)
+    for (y in 0 until height) {
+      val y0 = max(0, y - 1)
+      val y1 = min(height - 1, y + 1)
+      val row = y * width
+      for (x in 0 until width) {
+        val x0 = max(0, x - 1)
+        val x1 = min(width - 1, x + 1)
+        var any = false
+        loop@ for (yy in y0..y1) {
+          val ro = yy * width
+          for (xx in x0..x1) {
+            if (src[ro + xx]) {
+              any = true
+              break@loop
+            }
+          }
+        }
+        dilated[row + x] = any
+      }
+    }
+    val eroded = BooleanArray(src.size)
+    for (y in 0 until height) {
+      val y0 = max(0, y - 1)
+      val y1 = min(height - 1, y + 1)
+      val row = y * width
+      for (x in 0 until width) {
+        val x0 = max(0, x - 1)
+        val x1 = min(width - 1, x + 1)
+        var all = true
+        loop@ for (yy in y0..y1) {
+          val ro = yy * width
+          for (xx in x0..x1) {
+            if (!dilated[ro + xx]) {
+              all = false
+              break@loop
+            }
+          }
+        }
+        eroded[row + x] = all
+      }
+    }
+    return eroded
+  }
+
   private fun extractBestQuadFromMask(
     mask: BooleanArray,
     featY: IntArray,
+    featU: IntArray?,
+    featV: IntArray?,
     magArr: FloatArray,
     width: Int,
     height: Int,
@@ -260,7 +393,7 @@ object DocumentQuadDetector {
     val compPixels = IntArray(n)
 
     var bestQuad: NormalizedQuad? = null
-    val minCompArea = (n * 0.055f).toInt()
+    val minCompArea = (n * 0.042f).toInt()
     val maxCompArea = (n * 0.88f).toInt()
 
     for (start in 0 until n) {
@@ -292,7 +425,6 @@ object DocumentQuadDetector {
         sumY += py
         if (px == 0 || px == width - 1 || py == 0 || py == height - 1) borderTouches++
 
-        // 4-neighbors
         if (px > 0) {
           val nb = idx - 1
           if (mask[nb] && !visited[nb]) { visited[nb] = true; queue[tail++] = nb }
@@ -312,12 +444,10 @@ object DocumentQuadDetector {
       }
 
       if (compCount !in minCompArea..maxCompArea) continue
-      // Skip frame-border background leak
       if (borderTouches > compCount * 0.25f && (maxX - minX) > width * 0.92f && (maxY - minY) > height * 0.92f) {
         continue
       }
 
-      // Collect boundary pixels of this component
       val boundary = ArrayList<NormalizedPoint>(compCount / 4 + 16)
       for (k in 0 until compCount) {
         val idx = compPixels[k]
@@ -338,12 +468,11 @@ object DocumentQuadDetector {
       val rectArea = (minRect.halfW * 2f) * (minRect.halfH * 2f)
       if (rectArea <= 1f) continue
       val rectangularity = compCount.toFloat() / rectArea
-      if (rectangularity < 0.72f) continue
+      if (rectangularity < 0.70f) continue
 
       val aspect = max(minRect.halfW, minRect.halfH) / max(1f, min(minRect.halfW, minRect.halfH))
-      if (aspect > 3.8f) continue
+      if (aspect > 4.2f) continue
 
-      // Partition boundary pixels into Top, Right, Bottom, Left sides & fit robust lines
       val topPts = ArrayList<NormalizedPoint>()
       val rightPts = ArrayList<NormalizedPoint>()
       val bottomPts = ArrayList<NormalizedPoint>()
@@ -386,14 +515,17 @@ object DocumentQuadDetector {
         bottomRight = NormalizedPoint((ordered[2].x / width).coerceIn(0f, 1f), (ordered[2].y / height).coerceIn(0f, 1f)),
         bottomLeft = NormalizedPoint((ordered[3].x / width).coerceIn(0f, 1f), (ordered[3].y / height).coerceIn(0f, 1f)),
       )
-      if (!normQuad.isConvexValid(minArea = 0.055f)) continue
+      if (!normQuad.isConvexValid(minArea = 0.042f)) continue
       if (normQuad.areaRatio() > 0.88f) continue
 
-      // Measure actual image gradient & luminance contrast across the fitted 4 sides
-      val contrastScore = measureBoundaryContrast(
-        featY, width, height,
+      val sideContrasts = measurePerSideBoundaryContrast(
+        featY, featU, featV, width, height,
         ordered[0], ordered[1], ordered[2], ordered[3],
       )
+      val contrastScore = sideContrasts.average().toFloat()
+      val strongSides = sideContrasts.count { it >= 0.22f }
+      if (strongSides < 3 && contrastScore < 0.30f) continue
+
       val edgeSupport = (
         measureSegmentGradient(magArr, width, height, ordered[0], ordered[1]) +
           measureSegmentGradient(magArr, width, height, ordered[1], ordered[2]) +
@@ -401,12 +533,11 @@ object DocumentQuadDetector {
           measureSegmentGradient(magArr, width, height, ordered[3], ordered[0])
         ) * 0.25f
 
-      // Bonus for staying centered rather than hugging frame corners
       val centroidX = (sumX.toFloat() / compCount) / width
       val centroidY = (sumY.toFloat() / compCount) / height
       val centerBonus = (1f - hypot(centroidX - 0.5f, centroidY - 0.5f) * 1.4f).coerceIn(0f, 1f)
 
-      val confidence = (rectangularity * 0.45f + contrastScore * 0.30f + edgeSupport * 0.15f + centerBonus * 0.10f)
+      val confidence = (rectangularity * 0.44f + contrastScore * 0.30f + edgeSupport * 0.16f + centerBonus * 0.10f)
         .coerceIn(0f, 1f)
 
       if (bestQuad == null || confidence > bestQuad.confidence) {
@@ -417,7 +548,9 @@ object DocumentQuadDetector {
   }
 
   private fun findOrientedEdgeQuad(
-    smoothY: IntArray,
+    featY: IntArray,
+    featU: IntArray?,
+    featV: IntArray?,
     gxArr: FloatArray,
     gyArr: FloatArray,
     magArr: FloatArray,
@@ -427,19 +560,19 @@ object DocumentQuadDetector {
     val n = width * height
     val magHist = IntArray(256)
     for (i in 0 until n) {
-      val b = (magArr[i] / 4f).toInt().coerceIn(0, 255)
+      val b = (magArr[i] / 5f).toInt().coerceIn(0, 255)
       magHist[b]++
     }
     var acc = 0
     var threshBin = 14
     for (b in 255 downTo 8) {
       acc += magHist[b]
-      if (acc >= n * 0.11f) {
+      if (acc >= n * 0.12f) {
         threshBin = b
         break
       }
     }
-    val edgeThreshold = max(32f, threshBin * 4f)
+    val edgeThreshold = max(36f, threshBin * 5f)
 
     val diag = hypot(width.toFloat(), height.toFloat()).toInt() + 4
     val rhoOffset = diag
@@ -483,11 +616,11 @@ object DocumentQuadDetector {
       }
     }
 
-    val hPeaks = extractHoughPeaks(hAcc, angleCount, rhoBins, rhoOffset, maxPeaks = 8) { t, r ->
+    val hPeaks = extractHoughPeaks(hAcc, angleCount, rhoBins, rhoOffset, maxPeaks = 14) { t, r ->
       (r - (width * 0.5f) * sin(t)) / cos(t)
     }.filter { it.centerPos in (height * 0.02f)..(height * 0.98f) }
 
-    val vPeaks = extractHoughPeaks(vAcc, angleCount, rhoBins, rhoOffset, maxPeaks = 8) { p, r ->
+    val vPeaks = extractHoughPeaks(vAcc, angleCount, rhoBins, rhoOffset, maxPeaks = 14) { p, r ->
       (r - (height * 0.5f) * sin(p)) / cos(p)
     }.filter { it.centerPos in (width * 0.02f)..(width * 0.98f) }
 
@@ -502,7 +635,7 @@ object DocumentQuadDetector {
         val h2 = hPeaks[j]
         val top = if (h1.centerPos < h2.centerPos) h1 else h2
         val bot = if (h1.centerPos < h2.centerPos) h2 else h1
-        if (bot.centerPos - top.centerPos < height * 0.18f) continue
+        if (bot.centerPos - top.centerPos < height * 0.12f) continue
         if (abs(top.theta - bot.theta) > 0.34f) continue
 
         for (k in vPeaks.indices) {
@@ -511,7 +644,7 @@ object DocumentQuadDetector {
             val v2 = vPeaks[l]
             val left = if (v1.centerPos < v2.centerPos) v1 else v2
             val right = if (v1.centerPos < v2.centerPos) v2 else v1
-            if (right.centerPos - left.centerPos < width * 0.18f) continue
+            if (right.centerPos - left.centerPos < width * 0.14f) continue
             if (abs(left.theta - right.theta) > 0.34f) continue
 
             val tl = intersectHV(top, left) ?: continue
@@ -530,7 +663,7 @@ object DocumentQuadDetector {
               bottomRight = NormalizedPoint((br.x / width).coerceIn(0f, 1f), (br.y / height).coerceIn(0f, 1f)),
               bottomLeft = NormalizedPoint((bl.x / width).coerceIn(0f, 1f), (bl.y / height).coerceIn(0f, 1f)),
             )
-            if (!normQuad.isConvexValid(minArea = 0.07f) || normQuad.areaRatio() > 0.90f) continue
+            if (!normQuad.isConvexValid(minArea = 0.042f) || normQuad.areaRatio() > 0.90f) continue
 
             val sTop = measureSegmentEdgeSupport(magArr, width, height, tl, tr, edgeThreshold)
             val sBot = measureSegmentEdgeSupport(magArr, width, height, bl, br, edgeThreshold)
@@ -538,10 +671,19 @@ object DocumentQuadDetector {
             val sRight = measureSegmentEdgeSupport(magArr, width, height, tr, br, edgeThreshold)
             val minSide = min(min(sTop, sBot), min(sLeft, sRight))
             val avgSide = (sTop + sBot + sLeft + sRight) * 0.25f
-            if (minSide < 0.28f || avgSide < 0.40f) continue
+            if (minSide < 0.30f || avgSide < 0.44f) continue
 
-            val contrast = measureBoundaryContrast(smoothY, width, height, tl, tr, br, bl)
-            val score = avgSide * 0.55f + minSide * 0.25f + contrast * 0.20f
+            val sideContrasts = measurePerSideBoundaryContrast(featY, featU, featV, width, height, tl, tr, br, bl)
+            val avgContrast = sideContrasts.average().toFloat()
+            val minContrast = sideContrasts.minOrNull() ?: 0f
+            if (sideContrasts.count { it >= 0.18f } < 3 || avgContrast < 0.24f) continue
+
+            // Penalize oversized quads bisected horizontally or vertically by an internal card edge
+            val bisectionPenalty = measureInteriorBisectionPenalty(
+              magArr, width, height, tl, tr, br, bl, edgeThreshold,
+            )
+
+            val score = avgSide * 0.45f + minSide * 0.20f + avgContrast * 0.25f + minContrast * 0.10f - bisectionPenalty
             if (score > bestScore) {
               bestScore = score
               bestQuad = normQuad.copy(confidence = score.coerceIn(0f, 1f))
@@ -550,7 +692,35 @@ object DocumentQuadDetector {
         }
       }
     }
-    return if (bestQuad != null && bestQuad.confidence >= 0.42f) bestQuad else null
+    return if (bestQuad != null && bestQuad.confidence >= 0.45f) bestQuad else null
+  }
+
+  private fun measureInteriorBisectionPenalty(
+    magArr: FloatArray,
+    width: Int,
+    height: Int,
+    tl: NormalizedPoint,
+    tr: NormalizedPoint,
+    br: NormalizedPoint,
+    bl: NormalizedPoint,
+    edgeThreshold: Float,
+  ): Float {
+    var maxSplit = 0f
+    // Check 3 interior horizontal chords (0.28, 0.50, 0.72)
+    for (frac in listOf(0.28f, 0.50f, 0.72f)) {
+      val leftPt = NormalizedPoint(tl.x + (bl.x - tl.x) * frac, tl.y + (bl.y - tl.y) * frac)
+      val rightPt = NormalizedPoint(tr.x + (br.x - tr.x) * frac, tr.y + (br.y - tr.y) * frac)
+      val s = measureSegmentEdgeSupport(magArr, width, height, leftPt, rightPt, edgeThreshold)
+      if (s > maxSplit) maxSplit = s
+    }
+    // Check 3 interior vertical chords (0.28, 0.50, 0.72)
+    for (frac in listOf(0.28f, 0.50f, 0.72f)) {
+      val topPt = NormalizedPoint(tl.x + (tr.x - tl.x) * frac, tl.y + (tr.y - tl.y) * frac)
+      val botPt = NormalizedPoint(bl.x + (br.x - bl.x) * frac, bl.y + (br.y - bl.y) * frac)
+      val s = measureSegmentEdgeSupport(magArr, width, height, topPt, botPt, edgeThreshold)
+      if (s > maxSplit) maxSplit = s
+    }
+    return ((maxSplit - 0.52f).coerceAtLeast(0f) * 0.45f)
   }
 
   private fun boxBlur3x3(src: IntArray, width: Int, height: Int): IntArray {
@@ -734,7 +904,6 @@ object DocumentQuadDetector {
       val theta = 0.5f * atan2(2f * sxy, sxx - syy)
       val tx = cos(theta)
       val ty = sin(theta)
-      // Normal perpendicular to direction (tx, ty)
       val nx = -ty
       val ny = tx
       val c = nx * mx + ny * my
@@ -743,7 +912,7 @@ object DocumentQuadDetector {
 
     val pass1 = fitTls(points) ?: return null
     val inliers = points.filter { p ->
-      abs(pass1.a * p.x + pass1.b * p.y - pass1.c) <= 2.4f
+      abs(pass1.a * p.x + pass1.b * p.y - pass1.c) <= 1.8f
     }
     return if (inliers.size >= 4) fitTls(inliers) ?: pass1 else pass1
   }
@@ -757,8 +926,6 @@ object DocumentQuadDetector {
   }
 
   private fun orderCornersClockwise(pts: List<NormalizedPoint>): List<NormalizedPoint> {
-    // Top-Left has smallest (x + y), Bottom-Right has largest (x + y)
-    // Top-Right has largest (x - y), Bottom-Left has smallest (x - y)
     val tl = pts.minBy { it.x + it.y }
     val br = pts.maxBy { it.x + it.y }
     val remaining = pts.filter { it !== tl && it !== br }
@@ -789,7 +956,7 @@ object DocumentQuadDetector {
       val row = a * rhoBins
       for (r in 2 until rhoBins - 2) {
         val v = acc[row + r]
-        if (v < 6f) continue
+        if (v < 5f) continue
         var isMax = true
         for (da in max(0, a - 1)..min(angleCount - 1, a + 1)) {
           val ar = da * rhoBins
@@ -810,7 +977,7 @@ object DocumentQuadDetector {
     all.sortByDescending { it.score }
     val selected = mutableListOf<LineCandidate>()
     for (cand in all) {
-      if (selected.none { abs(it.centerPos - cand.centerPos) < 10f && abs(it.theta - cand.theta) < 0.14f }) {
+      if (selected.none { abs(it.centerPos - cand.centerPos) < 9f && abs(it.theta - cand.theta) < 0.14f }) {
         selected.add(cand)
         if (selected.size >= maxPeaks) break
       }
@@ -840,7 +1007,7 @@ object DocumentQuadDetector {
   ): Float {
     val steps = 24
     var hits = 0
-    val softThresh = threshold * 0.7f
+    val softThresh = threshold * 0.65f
     for (i in 1 until steps) {
       val t = i.toFloat() / steps.toFloat()
       val cx = (p1.x + (p2.x - p1.x) * t).roundToInt()
@@ -886,127 +1053,56 @@ object DocumentQuadDetector {
           if (magArr[ro + xx] > localMax) localMax = magArr[ro + xx]
         }
       }
-      sum += (localMax / 110f).coerceIn(0f, 1f)
+      sum += (localMax / 130f).coerceIn(0f, 1f)
     }
     return sum / (steps - 1).toFloat()
   }
 
-  private fun measureBoundaryContrast(
-    smooth: IntArray,
+  private fun measurePerSideBoundaryContrast(
+    featY: IntArray,
+    featU: IntArray?,
+    featV: IntArray?,
     width: Int,
     height: Int,
     tl: NormalizedPoint,
     tr: NormalizedPoint,
     br: NormalizedPoint,
     bl: NormalizedPoint,
-  ): Float {
+  ): List<Float> {
     val cx = (tl.x + tr.x + br.x + bl.x) * 0.25f
     val cy = (tl.y + tr.y + br.y + bl.y) * 0.25f
 
-    fun sampleAt(x: Float, y: Float): Int {
+    fun idxAt(x: Float, y: Float): Int {
       val ix = x.roundToInt().coerceIn(0, width - 1)
       val iy = y.roundToInt().coerceIn(0, height - 1)
-      return smooth[iy * width + ix]
+      return iy * width + ix
     }
 
-    val mids = listOf(
-      NormalizedPoint((tl.x + tr.x) * 0.5f, (tl.y + tr.y) * 0.5f),
-      NormalizedPoint((tr.x + br.x) * 0.5f, (tr.y + br.y) * 0.5f),
-      NormalizedPoint((br.x + bl.x) * 0.5f, (br.y + bl.y) * 0.5f),
-      NormalizedPoint((bl.x + tl.x) * 0.5f, (bl.y + tl.y) * 0.5f),
-    )
+    val sides = listOf(tl to tr, tr to br, br to bl, bl to tl)
+    val tSamples = listOf(0.22f, 0.36f, 0.50f, 0.64f, 0.78f)
 
-    var diffSum = 0f
-    for (m in mids) {
-      val dx = m.x - cx
-      val dy = m.y - cy
-      val len = max(1f, hypot(dx, dy))
-      val nx = dx / len
-      val ny = dy / len
-      val inside = sampleAt(m.x - nx * 5f, m.y - ny * 5f)
-      val outside = sampleAt(m.x + nx * 5f, m.y + ny * 5f)
-      diffSum += abs(inside - outside)
-    }
-    return (diffSum / 4f / 65f).coerceIn(0f, 1f)
-  }
-}
+    return sides.map { (a, b) ->
+      var sideSum = 0f
+      for (t in tSamples) {
+        val px = a.x + (b.x - a.x) * t
+        val py = a.y + (b.y - a.y) * t
+        val dx = px - cx
+        val dy = py - cy
+        val len = max(1f, hypot(dx, dy))
+        val nx = dx / len
+        val ny = dy / len
 
-/**
- * Tracks consecutive detected quads to smooth jitter and emit auto-capture readiness
- * when the user holds the document steady.
- */
-class QuadStabilityTracker(
-  private val stabilityWindowMs: Long = 950L,
-  private val autoCaptureCooldownMs: Long = 2400L,
-  private val maxCornerDrift: Float = 0.032f,
-) {
-  var smoothedQuad: NormalizedQuad? = null
-    private set
-  var stabilityProgress: Float = 0f
-    private set
-
-  private var missedFrames = 0
-  private var stableSinceMs = 0L
-  private var lastAutoCaptureMs = -1L
-
-  fun update(detected: NormalizedQuad?, nowMs: Long): Boolean {
-    if (detected == null) {
-      missedFrames++
-      if (missedFrames > 5) {
-        smoothedQuad = null
-        stableSinceMs = 0L
-        stabilityProgress = 0f
-      } else {
-        stabilityProgress = (stabilityProgress - 0.18f).coerceAtLeast(0f)
+        val iIn = idxAt(px - nx * 5f, py - ny * 5f)
+        val iOut = idxAt(px + nx * 5f, py + ny * 5f)
+        val dLum = abs(featY[iIn] - featY[iOut]).toFloat()
+        val dChroma = if (featU != null && featV != null) {
+          (abs(featU[iIn] - featU[iOut]) + abs(featV[iIn] - featV[iOut])) * 1.65f
+        } else {
+          0f
+        }
+        sideSum += ((dLum * 0.65f + dChroma) / 68f).coerceIn(0f, 1f)
       }
-      return false
+      sideSum / tSamples.size.toFloat()
     }
-
-    missedFrames = 0
-    val prev = smoothedQuad
-    if (prev == null) {
-      smoothedQuad = detected
-      stableSinceMs = nowMs
-      stabilityProgress = 0.08f
-      return false
-    }
-
-    val delta = prev.maxCornerDelta(detected)
-    smoothedQuad = if (delta > 0.18f) {
-      stableSinceMs = nowMs
-      detected
-    } else {
-      prev.lerpTo(detected, 0.35f)
-    }
-
-    if (delta <= maxCornerDrift) {
-      if (stableSinceMs == 0L) stableSinceMs = nowMs
-      val elapsed = (nowMs - stableSinceMs).coerceAtLeast(0L)
-      stabilityProgress = (elapsed.toFloat() / stabilityWindowMs.toFloat()).coerceIn(0f, 1f)
-      val cooldownOk = lastAutoCaptureMs < 0L || (nowMs - lastAutoCaptureMs >= autoCaptureCooldownMs)
-      if (elapsed >= stabilityWindowMs && cooldownOk) {
-        lastAutoCaptureMs = nowMs
-        stableSinceMs = nowMs
-        stabilityProgress = 0f
-        return true
-      }
-    } else {
-      stableSinceMs = nowMs
-      stabilityProgress = 0.1f
-    }
-    return false
-  }
-
-  fun markManualCapture(nowMs: Long) {
-    lastAutoCaptureMs = nowMs
-    stableSinceMs = nowMs
-    stabilityProgress = 0f
-  }
-
-  fun reset() {
-    smoothedQuad = null
-    missedFrames = 0
-    stableSinceMs = 0L
-    stabilityProgress = 0f
   }
 }

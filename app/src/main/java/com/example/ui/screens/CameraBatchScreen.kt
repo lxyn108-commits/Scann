@@ -12,13 +12,12 @@ import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.view.CameraController
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
@@ -31,15 +30,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -47,7 +43,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FlashlightOff
@@ -56,11 +51,7 @@ import androidx.compose.material.icons.filled.GridOff
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -83,14 +74,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -98,12 +86,13 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
-import com.example.R
 import com.example.domain.model.DraftPage
 import com.example.domain.model.NormalizedQuad
 import com.example.processing.DocumentQuadDetector
 import com.example.processing.QuadStabilityTracker
 import com.example.processing.ScanPreset
+import com.example.ui.components.CameraPermissionPrompt
+import com.example.ui.components.DocumentQuadOverlay
 import com.example.ui.theme.LocalClearScanColors
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -112,9 +101,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.Executors
-import kotlin.math.hypot
-import kotlin.math.max
-import kotlin.math.min
 
 @Composable
 fun CameraBatchScreen(
@@ -231,11 +217,17 @@ private fun CameraViewfinderContent(
   }
 
   val cameraController = remember {
+    val unifiedAspectSelector = ResolutionSelector.Builder()
+      .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+      .build()
     LifecycleCameraController(context).apply {
       cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
       setEnabledUseCases(
         CameraController.IMAGE_CAPTURE or CameraController.IMAGE_ANALYSIS
       )
+      previewResolutionSelector = unifiedAspectSelector
+      imageAnalysisResolutionSelector = unifiedAspectSelector
+      imageCaptureResolutionSelector = unifiedAspectSelector
       imageCaptureFlashMode = ImageCapture.FLASH_MODE_AUTO
     }
   }
@@ -323,17 +315,7 @@ private fun CameraViewfinderContent(
     }
   }
 
-  // Smooth corner animations for Oppo-style white rounded document border
   val activeQuad = detectedQuad
-  val animSpec = spring<Float>(stiffness = Spring.StiffnessMediumLow, dampingRatio = 0.85f)
-  val tlX by animateFloatAsState(activeQuad?.topLeft?.x ?: 0.14f, animSpec, label = "tlX")
-  val tlY by animateFloatAsState(activeQuad?.topLeft?.y ?: 0.22f, animSpec, label = "tlY")
-  val trX by animateFloatAsState(activeQuad?.topRight?.x ?: 0.86f, animSpec, label = "trX")
-  val trY by animateFloatAsState(activeQuad?.topRight?.y ?: 0.22f, animSpec, label = "trY")
-  val brX by animateFloatAsState(activeQuad?.bottomRight?.x ?: 0.86f, animSpec, label = "brX")
-  val brY by animateFloatAsState(activeQuad?.bottomRight?.y ?: 0.70f, animSpec, label = "brY")
-  val blX by animateFloatAsState(activeQuad?.bottomLeft?.x ?: 0.14f, animSpec, label = "blX")
-  val blY by animateFloatAsState(activeQuad?.bottomLeft?.y ?: 0.70f, animSpec, label = "blY")
 
   Box(modifier = Modifier.fillMaxSize()) {
     AndroidView(
@@ -347,117 +329,14 @@ private fun CameraViewfinderContent(
       modifier = Modifier.fillMaxSize(),
     )
 
-    // Real-Time Document Quad Overlay + Optional Alignment Grid
-    Canvas(modifier = Modifier.fillMaxSize()) {
-      val viewW = size.width
-      val viewH = size.height
+    DocumentQuadOverlay(
+      activeQuad = activeQuad,
+      analysisFrameSize = analysisFrameSize,
+      showGrid = showGrid,
+      stabilityProgress = stabilityProgress,
+      autoCaptureEnabled = autoCaptureEnabled,
+    )
 
-      if (showGrid) {
-        val gridColor = Color.White.copy(alpha = 0.2f)
-        for (i in 1..2) {
-          drawLine(gridColor, Offset(viewW * i / 3f, 0f), Offset(viewW * i / 3f, viewH), 1.dp.toPx())
-          drawLine(gridColor, Offset(0f, viewH * i / 3f), Offset(viewW, viewH * i / 3f), 1.dp.toPx())
-        }
-      }
-
-      if (activeQuad != null) {
-        val frameW = analysisFrameSize.first.toFloat().coerceAtLeast(1f)
-        val frameH = analysisFrameSize.second.toFloat().coerceAtLeast(1f)
-        val scale = max(viewW / frameW, viewH / frameH)
-        val scaledW = frameW * scale
-        val scaledH = frameH * scale
-        val offsetX = (viewW - scaledW) * 0.5f
-        val offsetY = (viewH - scaledH) * 0.5f
-
-        fun toView(nx: Float, ny: Float) = Offset(
-          x = offsetX + nx * scaledW,
-          y = offsetY + ny * scaledH,
-        )
-
-        val pTL = toView(tlX, tlY)
-        val pTR = toView(trX, trY)
-        val pBR = toView(brX, brY)
-        val pBL = toView(blX, blY)
-
-        // Subtle translucent document highlight
-        val fillPath = Path().apply {
-          moveTo(pTL.x, pTL.y)
-          lineTo(pTR.x, pTR.y)
-          lineTo(pBR.x, pBR.y)
-          lineTo(pBL.x, pBL.y)
-          close()
-        }
-        drawPath(path = fillPath, color = Color.White.copy(alpha = 0.08f))
-        drawPath(
-          path = fillPath,
-          color = Color.White.copy(alpha = 0.38f),
-          style = Stroke(width = 1.2.dp.toPx()),
-        )
-
-        // Oppo-style thick white rounded corner brackets hugging the quad
-        val bracketColor = if (stabilityProgress >= 0.65f && autoCaptureEnabled) {
-          Color.White
-        } else {
-          Color.White.copy(alpha = 0.96f)
-        }
-        val cornerStroke = Stroke(
-          width = 3.5.dp.toPx(),
-          cap = StrokeCap.Round,
-          join = StrokeJoin.Round,
-        )
-
-        fun drawCornerBracket(corner: Offset, adjA: Offset, adjB: Offset) {
-          val lenA = hypot(adjA.x - corner.x, adjA.y - corner.y).coerceAtLeast(1f)
-          val lenB = hypot(adjB.x - corner.x, adjB.y - corner.y).coerceAtLeast(1f)
-          val armA = min(38.dp.toPx(), lenA * 0.28f)
-          val armB = min(38.dp.toPx(), lenB * 0.28f)
-          val radius = min(14.dp.toPx(), min(armA, armB) * 0.45f)
-
-          val dirAx = (adjA.x - corner.x) / lenA
-          val dirAy = (adjA.y - corner.y) / lenA
-          val dirBx = (adjB.x - corner.x) / lenB
-          val dirBy = (adjB.y - corner.y) / lenB
-
-          val startA = Offset(corner.x + dirAx * armA, corner.y + dirAy * armA)
-          val curveStartA = Offset(corner.x + dirAx * radius, corner.y + dirAy * radius)
-          val curveEndB = Offset(corner.x + dirBx * radius, corner.y + dirBy * radius)
-          val endB = Offset(corner.x + dirBx * armB, corner.y + dirBy * armB)
-
-          val path = Path().apply {
-            moveTo(startA.x, startA.y)
-            lineTo(curveStartA.x, curveStartA.y)
-            quadraticTo(corner.x, corner.y, curveEndB.x, curveEndB.y)
-            lineTo(endB.x, endB.y)
-          }
-          drawPath(path = path, color = bracketColor, style = cornerStroke)
-        }
-
-        drawCornerBracket(pTL, pTR, pBL)
-        drawCornerBracket(pTR, pTL, pBR)
-        drawCornerBracket(pBR, pTR, pBL)
-        drawCornerBracket(pBL, pTL, pBR)
-      } else {
-        // Subtle alignment reticle when searching for document edges
-        val padX = viewW * 0.10f
-        val left = padX
-        val right = viewW - padX
-        val top = viewH * 0.20f
-        val bottom = viewH * 0.68f
-        val cornerLen = 26.dp.toPx()
-        val strokeW = 2.5.dp.toPx()
-        val guideColor = Color.White.copy(alpha = 0.55f)
-        drawLine(guideColor, Offset(left, top), Offset(left + cornerLen, top), strokeW, StrokeCap.Round)
-        drawLine(guideColor, Offset(left, top), Offset(left, top + cornerLen), strokeW, StrokeCap.Round)
-        drawLine(guideColor, Offset(right, top), Offset(right - cornerLen, top), strokeW, StrokeCap.Round)
-        drawLine(guideColor, Offset(right, top), Offset(right, top + cornerLen), strokeW, StrokeCap.Round)
-        drawLine(guideColor, Offset(left, bottom), Offset(left + cornerLen, bottom), strokeW, StrokeCap.Round)
-        drawLine(guideColor, Offset(left, bottom), Offset(left, bottom - cornerLen), strokeW, StrokeCap.Round)
-        drawLine(guideColor, Offset(right, bottom), Offset(right - cornerLen, bottom), strokeW, StrokeCap.Round)
-        drawLine(guideColor, Offset(right, bottom), Offset(right, bottom - cornerLen), strokeW, StrokeCap.Round)
-      }
-    }
-
-    // Shutter Flash
     AnimatedVisibility(visible = showShutterFlash, enter = fadeIn(), exit = fadeOut()) {
       Box(modifier = Modifier.fillMaxSize().background(Color.White.copy(alpha = 0.65f)))
     }
@@ -561,7 +440,7 @@ private fun CameraViewfinderContent(
       }
     }
 
-    // Bottom Floating "Pindai dokumen >" Pill + Presets + Oppo Iridescent Shutter Deck
+    // Bottom Floating "Pindai dokumen >" Pill + Presets + Shutter Deck
     Column(
       modifier = Modifier
         .align(Alignment.BottomCenter)
@@ -570,7 +449,6 @@ private fun CameraViewfinderContent(
         .padding(bottom = 16.dp),
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-      // Floating "Pindai dokumen >" pill (shown prominently when document detected or batch has pages)
       AnimatedVisibility(
         visible = activeQuad != null || batchPages.isNotEmpty() || isRetakingPage,
         enter = fadeIn(),
@@ -642,7 +520,6 @@ private fun CameraViewfinderContent(
         }
       }
 
-      // Bottom Scrim Container for Preset Chips, Filmstrip & Shutter Controls
       Column(
         modifier = Modifier
           .fillMaxWidth()
@@ -737,7 +614,6 @@ private fun CameraViewfinderContent(
           horizontalArrangement = Arrangement.SpaceBetween,
           verticalAlignment = Alignment.CenterVertically,
         ) {
-          // Gallery Import Circular Button
           IconButton(
             onClick = onImportClick,
             modifier = Modifier
@@ -753,7 +629,6 @@ private fun CameraViewfinderContent(
             )
           }
 
-          // Oppo-Style Iridescent Outer Ring + White Shutter + Auto-Capture Arc
           Box(
             modifier = Modifier
               .size(84.dp)
@@ -809,7 +684,6 @@ private fun CameraViewfinderContent(
             }
           }
 
-          // Review / Edit Studio Circular Grid Button with Page Count Badge
           Box(contentAlignment = Alignment.TopEnd) {
             IconButton(
               onClick = onReviewBatch,
@@ -843,107 +717,6 @@ private fun CameraViewfinderContent(
                 )
               }
             }
-          }
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun CameraPermissionPrompt(
-  onRequestPermission: () -> Unit,
-  onImportFromGallery: () -> Unit,
-  onClose: () -> Unit,
-  batchCount: Int,
-  onReviewBatch: () -> Unit,
-) {
-  Box(
-    modifier = Modifier
-      .fillMaxSize()
-      .statusBarsPadding()
-      .navigationBarsPadding()
-      .padding(24.dp),
-  ) {
-    IconButton(
-      onClick = onClose,
-      modifier = Modifier
-        .align(Alignment.TopStart)
-        .size(48.dp)
-        .clip(CircleShape)
-        .background(Color.White.copy(alpha = 0.12f)),
-    ) {
-      Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White)
-    }
-
-    Card(
-      modifier = Modifier.align(Alignment.Center),
-      shape = RoundedCornerShape(24.dp),
-      colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-      Column(
-        modifier = Modifier.padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-      ) {
-        Surface(
-          shape = CircleShape,
-          color = MaterialTheme.colorScheme.primaryContainer,
-          modifier = Modifier.size(64.dp),
-        ) {
-          Box(contentAlignment = Alignment.Center) {
-            Icon(
-              imageVector = Icons.Filled.CameraAlt,
-              contentDescription = null,
-              tint = MaterialTheme.colorScheme.onPrimaryContainer,
-              modifier = Modifier.size(30.dp),
-            )
-          }
-        }
-        Spacer(Modifier.height(16.dp))
-        Text(
-          text = stringResource(R.string.camera_permission_title),
-          style = MaterialTheme.typography.headlineSmall,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-          text = stringResource(R.string.camera_permission_body),
-          style = MaterialTheme.typography.bodyMedium,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(20.dp))
-        Button(
-          onClick = onRequestPermission,
-          modifier = Modifier
-            .fillMaxWidth()
-            .height(50.dp)
-            .testTag("grant_camera_button"),
-          shape = RoundedCornerShape(14.dp),
-        ) {
-          Text(stringResource(R.string.action_grant_camera))
-        }
-        Spacer(Modifier.height(10.dp))
-        FilledTonalButton(
-          onClick = onImportFromGallery,
-          modifier = Modifier
-            .fillMaxWidth()
-            .height(50.dp)
-            .testTag("permission_fallback_import_button"),
-          shape = RoundedCornerShape(14.dp),
-        ) {
-          Icon(Icons.Filled.PhotoLibrary, contentDescription = null)
-          Spacer(Modifier.width(8.dp))
-          Text(stringResource(R.string.action_import_photos))
-        }
-        if (batchCount > 0) {
-          Spacer(Modifier.height(10.dp))
-          FilledTonalButton(
-            onClick = onReviewBatch,
-            modifier = Modifier
-              .fillMaxWidth()
-              .height(50.dp),
-            shape = RoundedCornerShape(14.dp),
-          ) {
-            Text("Lanjut ke Edit ($batchCount)")
           }
         }
       }
