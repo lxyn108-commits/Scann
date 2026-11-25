@@ -4,8 +4,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.net.Uri
@@ -17,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -24,7 +23,16 @@ import kotlin.math.roundToInt
 
 object DocumentImageProcessor {
   private const val MAX_DIMENSION_PX = 2200
+  private const val MESH_DIVS = 16
   private val imageProcessor = ImageProcessor()
+
+  internal data class CurvedBorderMargins(
+    val topFrac: FloatArray,
+    val bottomFrac: FloatArray,
+    val leftFrac: FloatArray,
+    val rightFrac: FloatArray,
+    val hasAdjustment: Boolean,
+  )
 
   suspend fun saveCameraCaptureOriented(
     sourceFile: File,
@@ -73,11 +81,13 @@ object DocumentImageProcessor {
   ): Pair<Int, Int> = withContext(Dispatchers.Default) {
     val src = decodeSampledBitmap(rawFile.absolutePath, MAX_DIMENSION_PX)
     if (quad.isFullImage || !quad.isConvexValid(minArea = 0.04f)) {
-      if (rawFile.absolutePath != destFile.absolutePath) {
-        saveJpeg(src, destFile, 94)
+      val flattened = straightenCurvedBordersIfNeeded(src)
+      if (flattened !== src) src.recycle()
+      if (rawFile.absolutePath != destFile.absolutePath || flattened !== src) {
+        saveJpeg(flattened, destFile, 94)
       }
-      val dims = src.width to src.height
-      src.recycle()
+      val dims = flattened.width to flattened.height
+      flattened.recycle()
       return@withContext dims
     }
 
@@ -130,10 +140,181 @@ object DocumentImageProcessor {
     canvas.drawBitmap(src, matrix, paint)
     src.recycle()
 
-    saveJpeg(warped, destFile, 94)
-    val dims = warped.width to warped.height
-    warped.recycle()
+    val straightened = straightenCurvedBordersIfNeeded(warped)
+    if (straightened !== warped) warped.recycle()
+
+    saveJpeg(straightened, destFile, 94)
+    val dims = straightened.width to straightened.height
+    straightened.recycle()
     dims
+  }
+
+  /**
+   * Straightens remaining 3D paper curve/sag along top, bottom, left, and right borders
+   * (common on folded receipts photographed on tables) using a 16x16 Canvas bitmap mesh.
+   */
+  private fun straightenCurvedBordersIfNeeded(warped: Bitmap): Bitmap {
+    val gw = 128
+    val gh = max(64, (gw * warped.height.toFloat() / max(1, warped.width)).roundToInt().coerceAtMost(192))
+    val thumb = Bitmap.createScaledBitmap(warped, gw, gh, true)
+    val pixels = IntArray(gw * gh)
+    thumb.getPixels(pixels, 0, gw, 0, 0, gw, gh)
+    if (thumb !== warped) thumb.recycle()
+
+    val margins = detectCurvedEdgeMargins(pixels, gw, gh, meshDivs = MESH_DIVS)
+    if (!margins.hasAdjustment) return warped
+
+    val w = warped.width.toFloat()
+    val h = warped.height.toFloat()
+    val count = (MESH_DIVS + 1) * (MESH_DIVS + 1)
+    val verts = FloatArray(count * 2)
+
+    var vIdx = 0
+    for (row in 0..MESH_DIVS) {
+      val v = row.toFloat() / MESH_DIVS.toFloat()
+      val xL = margins.leftFrac[row] * w
+      val xR = (1f - margins.rightFrac[row]) * w
+      val xSpan = max(w * 0.65f, xR - xL)
+
+      for (col in 0..MESH_DIVS) {
+        val u = col.toFloat() / MESH_DIVS.toFloat()
+        val yT = margins.topFrac[col] * h
+        val yB = (1f - margins.bottomFrac[col]) * h
+        val ySpan = max(h * 0.65f, yB - yT)
+
+        val srcX = u * w
+        val srcY = v * h
+        verts[vIdx++] = ((srcX - xL) / xSpan) * w
+        verts[vIdx++] = ((srcY - yT) / ySpan) * h
+      }
+    }
+
+    val out = Bitmap.createBitmap(warped.width, warped.height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(out)
+    canvas.drawColor(android.graphics.Color.WHITE)
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    canvas.drawBitmapMesh(warped, MESH_DIVS, MESH_DIVS, verts, 0, null, 0, paint)
+    return out
+  }
+
+  internal fun detectCurvedEdgeMargins(
+    argbPixels: IntArray,
+    width: Int,
+    height: Int,
+    meshDivs: Int = MESH_DIVS,
+  ): CurvedBorderMargins {
+    val zero = FloatArray(meshDivs + 1)
+    if (width < 32 || height < 32 || argbPixels.size < width * height) {
+      return CurvedBorderMargins(zero, zero, zero, zero, false)
+    }
+
+    // Estimate interior document color from center 35%..65% using median-like channel averages
+    val x0 = (width * 0.30f).roundToInt()
+    val x1 = (width * 0.70f).roundToInt()
+    val y0 = (height * 0.30f).roundToInt()
+    val y1 = (height * 0.70f).roundToInt()
+    var sumR = 0L
+    var sumG = 0L
+    var sumB = 0L
+    var brightCount = 0
+    for (yy in y0 until y1) {
+      val ro = yy * width
+      for (xx in x0 until x1) {
+        val c = argbPixels[ro + xx]
+        val r = (c ushr 16) and 0xFF
+        val g = (c ushr 8) and 0xFF
+        val b = c and 0xFF
+        val lum = (r * 77 + g * 150 + b * 29) ushr 8
+        if (lum >= 110) { // avoid dark printed text lowering paper estimate
+          sumR += r
+          sumG += g
+          sumB += b
+          brightCount++
+        }
+      }
+    }
+    if (brightCount < 16) {
+      return CurvedBorderMargins(zero, zero, zero, zero, false)
+    }
+    val paperR = (sumR / brightCount).toInt()
+    val paperG = (sumG / brightCount).toInt()
+    val paperB = (sumB / brightCount).toInt()
+    val paperLum = (paperR * 77 + paperG * 150 + paperB * 29) ushr 8
+
+    fun isDeskPixel(c: Int): Boolean {
+      val r = (c ushr 16) and 0xFF
+      val g = (c ushr 8) and 0xFF
+      val b = c and 0xFF
+      val lum = (r * 77 + g * 150 + b * 29) ushr 8
+      val colorDist = abs(r - paperR) + abs(g - paperG) + abs(b - paperB)
+      val chromaDiff = abs((b - r) - (paperB - paperR)) + abs((g - r) - (paperG - paperR))
+      // Desk pixels differ in BOTH color/hue or clearly sit darker than bright interior paper
+      return (colorDist > 75 && chromaDiff > 28) || (paperLum - lum > 44 && lum < 120)
+    }
+
+    val topArr = FloatArray(meshDivs + 1)
+    val botArr = FloatArray(meshDivs + 1)
+    val leftArr = FloatArray(meshDivs + 1)
+    val rightArr = FloatArray(meshDivs + 1)
+
+    val maxScanY = (height * 0.11f).roundToInt().coerceAtLeast(3)
+    val maxScanX = (width * 0.11f).roundToInt().coerceAtLeast(3)
+
+    for (col in 0..meshDivs) {
+      val px = (col.toFloat() / meshDivs.toFloat() * (width - 1)).roundToInt().coerceIn(0, width - 1)
+      if (isDeskPixel(argbPixels[px])) {
+        var y = 0
+        while (y < maxScanY && isDeskPixel(argbPixels[y * width + px])) y++
+        if (y < maxScanY) topArr[col] = (y + 0.5f) / height.toFloat()
+      }
+      if (isDeskPixel(argbPixels[(height - 1) * width + px])) {
+        var step = 0
+        while (step < maxScanY && isDeskPixel(argbPixels[(height - 1 - step) * width + px])) step++
+        if (step < maxScanY) botArr[col] = (step + 0.5f) / height.toFloat()
+      }
+    }
+
+    for (row in 0..meshDivs) {
+      val py = (row.toFloat() / meshDivs.toFloat() * (height - 1)).roundToInt().coerceIn(0, height - 1)
+      val ro = py * width
+      if (isDeskPixel(argbPixels[ro])) {
+        var x = 0
+        while (x < maxScanX && isDeskPixel(argbPixels[ro + x])) x++
+        if (x < maxScanX) leftArr[row] = (x + 0.5f) / width.toFloat()
+      }
+      if (isDeskPixel(argbPixels[ro + width - 1])) {
+        var step = 0
+        while (step < maxScanX && isDeskPixel(argbPixels[ro + width - 1 - step])) step++
+        if (step < maxScanX) rightArr[row] = (step + 0.5f) / width.toFloat()
+      }
+    }
+
+    fun smooth1D(arr: FloatArray): FloatArray {
+      val res = arr.copyOf()
+      for (i in 1 until arr.size - 1) {
+        res[i] = (arr[i - 1] + 2f * arr[i] + arr[i + 1]) * 0.25f
+      }
+      return res
+    }
+
+    val sTop = smooth1D(topArr)
+    val sBot = smooth1D(botArr)
+    val sLeft = smooth1D(leftArr)
+    val sRight = smooth1D(rightArr)
+
+    val maxShift = maxOf(
+      sTop.maxOrNull() ?: 0f,
+      sBot.maxOrNull() ?: 0f,
+      sLeft.maxOrNull() ?: 0f,
+      sRight.maxOrNull() ?: 0f,
+    )
+    return CurvedBorderMargins(
+      topFrac = sTop,
+      bottomFrac = sBot,
+      leftFrac = sLeft,
+      rightFrac = sRight,
+      hasAdjustment = maxShift >= 0.008f,
+    )
   }
 
   suspend fun cropSourceImage(
@@ -283,7 +464,6 @@ object DocumentImageProcessor {
         }
         val spread = (p90 - p10).toFloat()
 
-        // Compare center document region luminance vs outer margin rows/cols
         val cx0 = (w * 0.25f).roundToInt()
         val cx1 = (w * 0.75f).roundToInt()
         val cy0 = (h * 0.25f).roundToInt()

@@ -523,4 +523,38 @@ class SearchablePdfAndOcrTest {
     tracker.update(outlierPetal, 1120L)
     assertEquals(0.25f, tracker.smoothedQuad!!.topLeft.x, 0.0001f)
   }
+
+  @Test
+  fun documentImageProcessorDetectsCurvedDeskDipWithoutCuttingFlatTextMargin() {
+    val w = 80
+    val h = 100
+    val paperWhite = (0xFF shl 24) or (235 shl 16) or (232 shl 8) or 236
+    val blueDesk = (0xFF shl 24) or (30 shl 16) or (135 shl 8) or 225
+    val blueLogoInk = (0xFF shl 24) or (25 shl 16) or (95 shl 8) or 185
+
+    // Case 1: Bowed/curled paper where top middle dips 7% showing blue desk
+    val curvedPixels = IntArray(w * h) { paperWhite }
+    for (x in 0 until w) {
+      val nx = x.toFloat() / (w - 1)
+      val sagFrac = 0.07f * kotlin.math.sin(nx * Math.PI).toFloat()
+      val sagPx = (sagFrac * h).toInt()
+      for (y in 0 until sagPx) {
+        curvedPixels[y * w + x] = blueDesk
+      }
+    }
+    val curvedMargins = DocumentImageProcessor.detectCurvedEdgeMargins(curvedPixels, w, h, meshDivs = 8)
+    assertTrue("Curved dip should trigger mesh straightening", curvedMargins.hasAdjustment)
+    assertTrue("Center top column should trim ~0.06..0.08 (was ${curvedMargins.topFrac[4]})", curvedMargins.topFrac[4] in 0.04f..0.095f)
+    assertTrue("Outer edge column should stay near 0 (was ${curvedMargins.topFrac[0]})", curvedMargins.topFrac[0] < 0.025f)
+
+    // Case 2: Clean flat paper with blue logo inside top margin
+    val flatPixels = IntArray(w * h) { paperWhite }
+    for (y in 6..18) {
+      for (x in 20..60) {
+        flatPixels[y * w + x] = blueLogoInk
+      }
+    }
+    val flatMargins = DocumentImageProcessor.detectCurvedEdgeMargins(flatPixels, w, h, meshDivs = 8)
+    assertFalse("Clean flat sheet should not trigger spurious border warp", flatMargins.hasAdjustment)
+  }
 }

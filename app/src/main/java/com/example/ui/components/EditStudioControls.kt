@@ -99,7 +99,7 @@ fun EditStudioActionStrip(
     )
     StudioToolItem(
       icon = Icons.Filled.TextFields,
-      label = "Ekstrak\nteks",
+      label = "Teks\nOCR",
       isActive = false,
       testTag = "tool_extract_text_button",
       onClick = onExtractText,
@@ -107,7 +107,7 @@ fun EditStudioActionStrip(
     )
     StudioToolItem(
       icon = Icons.Filled.AutoFixHigh,
-      label = "Hapus\nbayangan",
+      label = "Hapus\nbayang",
       isActive = shadowRemovalEnabled,
       testTag = "tool_shadow_removal_button",
       onClick = onToggleShadowRemoval,
@@ -153,11 +153,14 @@ private fun StudioToolItem(
     Spacer(Modifier.height(3.dp))
     Text(
       text = label,
-      style = MaterialTheme.typography.labelSmall,
+      style = MaterialTheme.typography.labelSmall.copy(
+        fontSize = androidx.compose.ui.unit.TextUnit(10.5f, androidx.compose.ui.unit.TextUnitType.Sp),
+        lineHeight = androidx.compose.ui.unit.TextUnit(13f, androidx.compose.ui.unit.TextUnitType.Sp),
+      ),
       color = tint,
       textAlign = TextAlign.Center,
       maxLines = 2,
-      softWrap = false,
+      softWrap = true,
       overflow = TextOverflow.Ellipsis,
     )
   }
