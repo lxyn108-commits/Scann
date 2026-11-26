@@ -274,6 +274,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     when (suggestion) {
       is PageSuggestion.ApplyFilter -> applyFilterToSelectedPage(suggestion.filter)
       is PageSuggestion.AutoTrimBorders -> cropSelectedPage(suggestion.cropRect)
+      is PageSuggestion.EnableShadowRemoval -> {
+        val target = _batchState.value.pages.getOrNull(_batchState.value.selectedPageIndex)
+        if (target != null && !target.removeShadowAndGlare) {
+          toggleShadowRemovalForSelectedPage()
+        }
+      }
       is PageSuggestion.RotatePage -> rotateSelectedPage()
     }
   }
@@ -289,14 +295,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       var working = target
       var nextFilter = target.filter
       var nextRotation = target.rotationDegrees
+      var nextShadowRemoval = target.removeShadowAndGlare
       var trimRect: com.example.domain.model.NormalizedCropRect? = null
 
       for (suggestion in suggestions) {
         when (suggestion) {
           is PageSuggestion.AutoTrimBorders -> trimRect = suggestion.cropRect
+          is PageSuggestion.EnableShadowRemoval -> nextShadowRemoval = true
           is PageSuggestion.RotatePage -> nextRotation = (nextRotation + 90) % 360
           is PageSuggestion.ApplyFilter -> nextFilter = suggestion.filter
         }
+      }
+
+      if (nextShadowRemoval && nextFilter == EnhancementFilter.ORIGINAL) {
+        nextFilter = EnhancementFilter.MAGIC_COLOR
       }
 
       working = runCatching {
@@ -305,6 +317,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           filter = nextFilter,
           rotationDegrees = nextRotation,
           cropRect = trimRect,
+          removeShadowAndGlare = nextShadowRemoval,
         )
       }.getOrElse { working.copy(isProcessing = false) }
 
@@ -564,11 +577,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isDefaultPrefix = currentTitle.startsWith("Scan ") ||
       ScanPreset.entries.any { currentTitle.startsWith("${it.titlePrefix} ") }
     if (!isDefaultPrefix) return currentTitle
-    val firstLine = pages.firstOrNull()?.ocrResult?.lines?.firstOrNull()?.text?.trim()
-    return if (!firstLine.isNullOrBlank() && firstLine.length in 4..42) {
-      firstLine
-    } else {
-      currentTitle
-    }
+    val cleanLine = pages.firstOrNull()?.ocrResult?.lines
+      ?.map { it.text.replace(Regex("\\s+"), " ").trim() }
+      ?.firstOrNull { SmartScanAdvisor.isCleanTitleCandidate(it) }
+    return cleanLine ?: currentTitle
   }
 }

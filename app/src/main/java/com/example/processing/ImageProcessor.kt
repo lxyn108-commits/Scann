@@ -7,9 +7,10 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Scanner-grade image processor performing local RGB illumination/cast normalization,
- * adaptive white-paper watermark bleaching, black-point ink compression, 3x3 unsharp sharpening,
- * and 'magic color', 'black and white', and 'grayscale' document enhancements.
+ * Scanner-grade image processor performing tight local RGB illumination/cast normalization,
+ * ink-strength watermark & crease bleaching to spotless #FFFFFF, jet-black text compression,
+ * chromatic logo vibrancy boost, 5-tap unsharp sharpening, and 'magic color', 'black and white',
+ * and 'grayscale' enhancements.
  */
 class ImageProcessor {
 
@@ -27,76 +28,20 @@ class ImageProcessor {
   }
 
   /**
-   * Produces a flatbed-scanner look ("Warna"): pure white paper, bleached faint background
-   * watermarks/stains, razor-sharp deep black text, and vivid colored logos/stamps.
+   * Produces a flatbed-scanner look ("Warna"): pure #FFFFFF paper, bleached faint background
+   * watermarks/creases, razor-sharp jet-black text, and vivid colored logos/stamps.
    */
   fun applyMagicColor(
     source: Bitmap,
     removeShadowAndGlare: Boolean = true,
   ): Bitmap {
-    val base = if (removeShadowAndGlare) removeShadowAndGlare(source) else source
-    val width = base.width
-    val height = base.height
+    val width = source.width
+    val height = source.height
     val pixels = IntArray(width * height)
-    base.getPixels(pixels, 0, width, 0, 0, width, height)
-    if (base !== source) base.recycle()
-
-    // Estimate dynamic paper white & ink black floor from normalized buffer
-    val (paperWhite, inkFloor) = estimatePaperAndInkLevels(pixels)
-    val span = max(48f, (paperWhite - inkFloor).toFloat())
-
-    for (i in pixels.indices) {
-      val c = pixels[i]
-      val r = ((c ushr 16) and 0xFF).toFloat()
-      val g = ((c ushr 8) and 0xFF).toFloat()
-      val b = (c and 0xFF).toFloat()
-
-      val lum = 0.299f * r + 0.587f * g + 0.114f * b
-      val maxC = max(r, max(g, b))
-      val minC = min(r, min(g, b))
-      val chroma = maxC - minC
-
-      // 1. Bleach faint off-white watermarks / low-saturation stains smoothly to pure white
-      val paperBrightWeight = smoothstep(paperWhite - 46f, paperWhite - 10f, lum)
-      val lowChromaWeight = 1f - smoothstep(18f, 54f, chroma)
-      val bleachAlpha = paperBrightWeight * lowChromaWeight
-
-      // 2. Contrast tone curve anchoring ink cleanly to black and mid-tones crisp
-      val t = ((lum - inkFloor) / span).coerceIn(0f, 1f)
-      val contrastGain = if (lum > 1f) {
-        val targetLum = (t * t * (3f - 2f * t) * 255f)
-        // Mild blend keeps natural antialiasing while sharpening text darkness
-        val desiredLum = lum * 0.22f + targetLum * 0.78f
-        (desiredLum / lum).coerceIn(0.25f, 1.45f)
-      } else {
-        1f
-      }
-
-      var nr = r * contrastGain
-      var ng = g * contrastGain
-      var nb = b * contrastGain
-
-      // 3. Preserve & boost colored ink (blue stamps, logos, portraits) relative to new luminance
-      val newLum = (0.299f * nr + 0.587f * ng + 0.114f * nb).coerceIn(0f, 255f)
-      val satBoost = if (chroma > 22f) 1.32f else 1.08f
-      nr = newLum + (nr - newLum) * satBoost
-      ng = newLum + (ng - newLum) * satBoost
-      nb = newLum + (nb - newLum) * satBoost
-
-      // 4. Blend bleached paper regions to spotless #FFFFFF
-      nr = nr * (1f - bleachAlpha) + 255f * bleachAlpha
-      ng = ng * (1f - bleachAlpha) + 255f * bleachAlpha
-      nb = nb * (1f - bleachAlpha) + 255f * bleachAlpha
-
-      val ri = nr.roundToInt().coerceIn(0, 255)
-      val gi = ng.roundToInt().coerceIn(0, 255)
-      val bi = nb.roundToInt().coerceIn(0, 255)
-      pixels[i] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
-    }
-
-    val sharpened = applyUnsharpMask(pixels, width, height, strength = 0.40f)
+    source.getPixels(pixels, 0, width, 0, 0, width, height)
+    val enhanced = enhanceMagicColorBuffer(pixels, width, height, removeShadowAndGlare)
     val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    out.setPixels(sharpened, 0, width, 0, 0, width, height)
+    out.setPixels(enhanced, 0, width, 0, 0, width, height)
     return out
   }
 
@@ -107,33 +52,13 @@ class ImageProcessor {
     source: Bitmap,
     removeShadowAndGlare: Boolean = true,
   ): Bitmap {
-    val base = if (removeShadowAndGlare) removeShadowAndGlare(source) else source
-    val width = base.width
-    val height = base.height
+    val width = source.width
+    val height = source.height
     val pixels = IntArray(width * height)
-    base.getPixels(pixels, 0, width, 0, 0, width, height)
-    if (base !== source) base.recycle()
-
-    val (paperWhite, inkFloor) = estimatePaperAndInkLevels(pixels)
-    val span = max(48f, (paperWhite - inkFloor).toFloat())
-
-    for (i in pixels.indices) {
-      val c = pixels[i]
-      val r = (c ushr 16) and 0xFF
-      val g = (c ushr 8) and 0xFF
-      val b = c and 0xFF
-      val lum = (r * 77 + g * 150 + b * 29) ushr 8
-
-      val bleachAlpha = smoothstep(paperWhite - 42f, paperWhite - 8f, lum.toFloat())
-      val t = ((lum - inkFloor) / span).coerceIn(0f, 1f)
-      val curved = t * t * (3f - 2f * t) * 255f
-      val outLum = (curved * (1f - bleachAlpha) + 255f * bleachAlpha).roundToInt().coerceIn(0, 255)
-      pixels[i] = (0xFF shl 24) or (outLum shl 16) or (outLum shl 8) or outLum
-    }
-
-    val sharpened = applyUnsharpMask(pixels, width, height, strength = 0.36f)
+    source.getPixels(pixels, 0, width, 0, 0, width, height)
+    val enhanced = enhanceGrayscaleBuffer(pixels, width, height, removeShadowAndGlare)
     val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    out.setPixels(sharpened, 0, width, 0, 0, width, height)
+    out.setPixels(enhanced, 0, width, 0, 0, width, height)
     return out
   }
 
@@ -145,117 +70,326 @@ class ImageProcessor {
     source: Bitmap,
     removeShadowAndGlare: Boolean = true,
   ): Bitmap {
-    val base = if (removeShadowAndGlare) removeShadowAndGlare(source) else source
-    val width = base.width
-    val height = base.height
+    val width = source.width
+    val height = source.height
     val pixels = IntArray(width * height)
-    base.getPixels(pixels, 0, width, 0, 0, width, height)
-    if (base !== source) base.recycle()
-
-    val (paperWhite, _) = estimatePaperAndInkLevels(pixels)
-    val inkDark = max(56, (paperWhite * 0.56f).roundToInt())
-    val bwCeil = max(inkDark + 36, paperWhite - 24)
-    val span = max(28, bwCeil - inkDark)
-
-    for (i in pixels.indices) {
-      val c = pixels[i]
-      val r = (c ushr 16) and 0xFF
-      val g = (c ushr 8) and 0xFF
-      val b = c and 0xFF
-      val lum = (r * 77 + g * 150 + b * 29) ushr 8
-
-      val norm = ((lum - inkDark).toFloat() / span.toFloat()).coerceIn(0f, 1f)
-      val curved = norm * norm * (3f - 2f * norm)
-      val finalVal = (curved * 255f).roundToInt().coerceIn(0, 255)
-      pixels[i] = (0xFF shl 24) or (finalVal shl 16) or (finalVal shl 8) or finalVal
-    }
-
+    source.getPixels(pixels, 0, width, 0, 0, width, height)
+    val enhanced = enhanceBlackAndWhiteBuffer(pixels, width, height, removeShadowAndGlare)
     val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    out.setPixels(pixels, 0, width, 0, 0, width, height)
+    out.setPixels(enhanced, 0, width, 0, 0, width, height)
     return out
   }
 
   /**
-   * Estimates smooth local per-channel (R, G, B) background envelope via 5x5 max dilation +
-   * box smoothing, removing uneven shadows, ambient lighting casts (pink/cyan tint), and
-   * specular glare while keeping saturated card hues (e.g. blue ID cards) intact.
+   * Removes uneven shadows, paper creases, ambient lighting color casts, and glare.
    */
   fun removeShadowAndGlare(src: Bitmap): Bitmap {
     val w = src.width
     val h = src.height
-    val gridW = 64
-    val gridH = max(32, (gridW * h.toFloat() / max(1, w).toFloat()).roundToInt().coerceAtMost(96))
+    val pixels = IntArray(w * h)
+    src.getPixels(pixels, 0, w, 0, 0, w, h)
+    val normalized = removeShadowAndGlareBuffer(pixels, w, h)
+    val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    out.setPixels(normalized, 0, w, 0, 0, w, h)
+    return out
+  }
 
-    val small = Bitmap.createScaledBitmap(src, gridW, gridH, true)
-    val smallPixels = IntArray(gridW * gridH)
-    small.getPixels(smallPixels, 0, gridW, 0, 0, gridW, gridH)
-    if (small !== src) small.recycle()
+  internal fun enhanceMagicColorBuffer(
+    srcPixels: IntArray,
+    width: Int,
+    height: Int,
+    removeShadowAndGlare: Boolean = true,
+  ): IntArray {
+    if (width <= 0 || height <= 0 || srcPixels.size < width * height) return srcPixels
+    val base = if (removeShadowAndGlare) {
+      removeShadowAndGlareBuffer(srcPixels, width, height)
+    } else {
+      srcPixels.copyOf()
+    }
+
+    val lums = computeLuminanceArray(base, width, height)
+    val (paperWhite, inkFloor) = estimatePaperAndInkLevels(lums)
+    val whitePoint = (paperWhite - 16f).coerceIn(186f, 234f)
+    val blackFloor = inkFloor.toFloat().coerceIn(32f, 82f)
+    val colorSpan = max(52f, whitePoint - blackFloor)
+    val textBlackFloor = max(blackFloor, 46f).coerceAtMost(whitePoint - 56f)
+
+    for (y in 0 until height) {
+      val rowOff = y * width
+      val upOff = max(0, y - 1) * width
+      val downOff = min(height - 1, y + 1) * width
+
+      for (x in 0 until width) {
+        val i = rowOff + x
+        val c = base[i]
+        val r = ((c ushr 16) and 0xFF).toFloat()
+        val g = ((c ushr 8) and 0xFF).toFloat()
+        val b = (c and 0xFF).toFloat()
+
+        val lum = lums[i].toFloat()
+        val minN = min(
+          lums[i],
+          min(
+            min(lums[upOff + x], lums[downOff + x]),
+            min(lums[rowOff + max(0, x - 1)], lums[rowOff + min(width - 1, x + 1)]),
+          ),
+        )
+
+        val maxC = max(r, max(g, b))
+        val minC = min(r, min(g, b))
+        val chroma = maxC - minC
+
+        // Ink strength separates faint security watermarks & creases from stamps & crisp text
+        val inkStrength = (255f - lum) + chroma * 1.35f
+        val watermarkBleach = if (lum >= 178f && minN >= 148) {
+          1f - smoothstep(68f, 126f, inkStrength)
+        } else {
+          0f
+        }
+        val paperBrightWeight = smoothstep(whitePoint - 28f, whitePoint + 6f, lum)
+        val lowChromaWeight = 1f - smoothstep(18f, 52f, chroma)
+        val bleachAlpha = max(watermarkBleach, paperBrightWeight * lowChromaWeight).coerceIn(0f, 1f)
+
+        if (bleachAlpha >= 0.995f) {
+          base[i] = 0xFFFFFFFF.toInt()
+          continue
+        }
+
+        // Neutral dark ink compresses firmly to jet black; colored logos stay balanced & rich
+        val isAchromaticInk = chroma < 30f
+        val targetLum = if (isAchromaticInk) {
+          val tn = ((lum - textBlackFloor) / max(44f, whitePoint - textBlackFloor)).coerceIn(0f, 1f)
+          // Double S-curve anchors dark gray receipt ink cleanly to #000000 without eroding strokes
+          val s = tn * tn * (3f - 2f * tn)
+          (s * s * 0.35f + s * 0.65f) * 255f
+        } else {
+          val tc = ((lum - blackFloor) / colorSpan).coerceIn(0f, 1f)
+          val s = tc * tc * (3f - 2f * tc)
+          lum * 0.14f + s * 255f * 0.86f
+        }
+
+        val gain = if (lum > 1f) (targetLum / lum).coerceIn(0.15f, 1.48f) else 1f
+        var nr = r * gain
+        var ng = g * gain
+        var nb = b * gain
+
+        val newLum = (0.299f * nr + 0.587f * ng + 0.114f * nb).coerceIn(0f, 255f)
+        val satBoost = when {
+          chroma > 34f -> 1.42f
+          chroma > 18f -> 1.15f
+          else -> 0.92f // suppress slight color fringe around black body text
+        }
+        nr = newLum + (nr - newLum) * satBoost
+        ng = newLum + (ng - newLum) * satBoost
+        nb = newLum + (nb - newLum) * satBoost
+
+        nr = nr * (1f - bleachAlpha) + 255f * bleachAlpha
+        ng = ng * (1f - bleachAlpha) + 255f * bleachAlpha
+        nb = nb * (1f - bleachAlpha) + 255f * bleachAlpha
+
+        val ri = nr.roundToInt().coerceIn(0, 255)
+        val gi = ng.roundToInt().coerceIn(0, 255)
+        val bi = nb.roundToInt().coerceIn(0, 255)
+        base[i] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+      }
+    }
+
+    return applyUnsharpMask(base, width, height, strength = 0.45f)
+  }
+
+  internal fun enhanceGrayscaleBuffer(
+    srcPixels: IntArray,
+    width: Int,
+    height: Int,
+    removeShadowAndGlare: Boolean = true,
+  ): IntArray {
+    if (width <= 0 || height <= 0 || srcPixels.size < width * height) return srcPixels
+    val base = if (removeShadowAndGlare) {
+      removeShadowAndGlareBuffer(srcPixels, width, height)
+    } else {
+      srcPixels.copyOf()
+    }
+
+    val lums = computeLuminanceArray(base, width, height)
+    val (paperWhite, inkFloor) = estimatePaperAndInkLevels(lums)
+    val whitePoint = (paperWhite - 14f).coerceIn(186f, 236f)
+    val blackFloor = inkFloor.toFloat().coerceIn(32f, 82f)
+    val span = max(48f, whitePoint - blackFloor)
+
+    for (y in 0 until height) {
+      val rowOff = y * width
+      val upOff = max(0, y - 1) * width
+      val downOff = min(height - 1, y + 1) * width
+      for (x in 0 until width) {
+        val i = rowOff + x
+        val lum = lums[i].toFloat()
+        val minN = min(
+          lums[i],
+          min(
+            min(lums[upOff + x], lums[downOff + x]),
+            min(lums[rowOff + max(0, x - 1)], lums[rowOff + min(width - 1, x + 1)]),
+          ),
+        )
+
+        val watermarkBleach = if (lum >= 182f && minN >= 148) {
+          smoothstep(182f, whitePoint, lum)
+        } else {
+          0f
+        }
+        val bleachAlpha = max(watermarkBleach, smoothstep(whitePoint - 26f, whitePoint + 4f, lum))
+        val t = ((lum - blackFloor) / span).coerceIn(0f, 1f)
+        val curved = t * t * (3f - 2f * t) * 255f
+        val outLum = (curved * (1f - bleachAlpha) + 255f * bleachAlpha)
+          .roundToInt()
+          .coerceIn(0, 255)
+        base[i] = (0xFF shl 24) or (outLum shl 16) or (outLum shl 8) or outLum
+      }
+    }
+
+    return applyUnsharpMask(base, width, height, strength = 0.40f)
+  }
+
+  internal fun enhanceBlackAndWhiteBuffer(
+    srcPixels: IntArray,
+    width: Int,
+    height: Int,
+    removeShadowAndGlare: Boolean = true,
+  ): IntArray {
+    if (width <= 0 || height <= 0 || srcPixels.size < width * height) return srcPixels
+    val base = if (removeShadowAndGlare) {
+      removeShadowAndGlareBuffer(srcPixels, width, height)
+    } else {
+      srcPixels.copyOf()
+    }
+
+    val lums = computeLuminanceArray(base, width, height)
+    val (paperWhite, _) = estimatePaperAndInkLevels(lums)
+    val inkDark = max(62, (paperWhite * 0.56f).roundToInt())
+    val bwCeil = max(inkDark + 38, paperWhite - 28)
+    val span = max(28, bwCeil - inkDark)
+
+    for (i in base.indices) {
+      val lum = lums[i]
+      val norm = ((lum - inkDark).toFloat() / span.toFloat()).coerceIn(0f, 1f)
+      val curved = norm * norm * (3f - 2f * norm)
+      val finalVal = (curved * 255f).roundToInt().coerceIn(0, 255)
+      base[i] = (0xFF shl 24) or (finalVal shl 16) or (finalVal shl 8) or finalVal
+    }
+
+    return base
+  }
+
+  /**
+   * Estimates fine local RGB background envelope on a ~128px grid (tight enough to hug narrow
+   * paper folds and creases while bridging printed text via 5x5 dilation + 2-pass 3x3 smoothing),
+   * then bilinearly normalizes each pixel to remove shadows, ambient tint, and glare.
+   */
+  internal fun removeShadowAndGlareBuffer(srcPixels: IntArray, w: Int, h: Int): IntArray {
+    if (w <= 0 || h <= 0 || srcPixels.size < w * h) return srcPixels
+    val gridW = min(w, 128).coerceAtLeast(8)
+    val gridH = max(8, (gridW * h.toFloat() / max(1, w).toFloat()).roundToInt().coerceAtMost(min(h, 176)))
 
     val rGrid = IntArray(gridW * gridH)
     val gGrid = IntArray(gridW * gridH)
     val bGrid = IntArray(gridW * gridH)
-    for (i in smallPixels.indices) {
-      val c = smallPixels[i]
-      rGrid[i] = (c ushr 16) and 0xFF
-      gGrid[i] = (c ushr 8) and 0xFF
-      bGrid[i] = c and 0xFF
+
+    for (gy in 0 until gridH) {
+      val sy0 = (gy * h) / gridH
+      val sy1 = (((gy + 1) * h) / gridH).coerceAtLeast(sy0 + 1).coerceAtMost(h)
+      for (gx in 0 until gridW) {
+        val sx0 = (gx * w) / gridW
+        val sx1 = (((gx + 1) * w) / gridW).coerceAtLeast(sx0 + 1).coerceAtMost(w)
+        var sr = 0L
+        var sg = 0L
+        var sb = 0L
+        var cnt = 0
+        for (yy in sy0 until sy1) {
+          val ro = yy * w
+          for (xx in sx0 until sx1) {
+            val c = srcPixels[ro + xx]
+            sr += (c ushr 16) and 0xFF
+            sg += (c ushr 8) and 0xFF
+            sb += c and 0xFF
+            cnt++
+          }
+        }
+        val gi = gy * gridW + gx
+        val d = max(1, cnt)
+        rGrid[gi] = (sr / d).toInt()
+        gGrid[gi] = (sg / d).toInt()
+        bGrid[gi] = (sb / d).toInt()
+      }
     }
 
-    val bgR = smoothEnvelope(dilate5x5(rGrid, gridW, gridH), gridW, gridH)
-    val bgG = smoothEnvelope(dilate5x5(gGrid, gridW, gridH), gridW, gridH)
-    val bgB = smoothEnvelope(dilate5x5(bGrid, gridW, gridH), gridW, gridH)
+    val bgR = smooth3x3Envelope(dilate5x5(rGrid, gridW, gridH), gridW, gridH)
+    val bgG = smooth3x3Envelope(dilate5x5(gGrid, gridW, gridH), gridW, gridH)
+    val bgB = smooth3x3Envelope(dilate5x5(bGrid, gridW, gridH), gridW, gridH)
 
-    val bgSmallPixels = IntArray(gridW * gridH) { i ->
-      val rr = bgR[i].coerceIn(48, 255)
-      val gg = bgG[i].coerceIn(48, 255)
-      val bb = bgB[i].coerceIn(48, 255)
-      (0xFF shl 24) or (rr shl 16) or (gg shl 8) or bb
+    val out = IntArray(w * h)
+    val targetWhite = 252f
+    val xScale = (gridW - 1).toFloat() / max(1, w - 1).toFloat()
+    val yScale = (gridH - 1).toFloat() / max(1, h - 1).toFloat()
+
+    for (y in 0 until h) {
+      val fy = (y * yScale).coerceIn(0f, (gridH - 1).toFloat())
+      val gy0 = fy.toInt().coerceIn(0, gridH - 1)
+      val gy1 = (gy0 + 1).coerceAtMost(gridH - 1)
+      val wy = fy - gy0
+      val row0 = gy0 * gridW
+      val row1 = gy1 * gridW
+      val dstRow = y * w
+
+      for (x in 0 until w) {
+        val fx = (x * xScale).coerceIn(0f, (gridW - 1).toFloat())
+        val gx0 = fx.toInt().coerceIn(0, gridW - 1)
+        val gx1 = (gx0 + 1).coerceAtMost(gridW - 1)
+        val wx = fx - gx0
+
+        val w00 = (1f - wx) * (1f - wy)
+        val w10 = wx * (1f - wy)
+        val w01 = (1f - wx) * wy
+        val w11 = wx * wy
+
+        val br = (bgR[row0 + gx0] * w00 + bgR[row0 + gx1] * w10 + bgR[row1 + gx0] * w01 + bgR[row1 + gx1] * w11).coerceAtLeast(56f)
+        val bg = (bgG[row0 + gx0] * w00 + bgG[row0 + gx1] * w10 + bgG[row1 + gx0] * w01 + bgG[row1 + gx1] * w11).coerceAtLeast(56f)
+        val bb = (bgB[row0 + gx0] * w00 + bgB[row0 + gx1] * w10 + bgB[row1 + gx0] * w01 + bgB[row1 + gx1] * w11).coerceAtLeast(56f)
+
+        val bgLum = (0.299f * br + 0.587f * bg + 0.114f * bb).coerceAtLeast(56f)
+        val bgChroma = max(br, max(bg, bb)) - min(br, min(bg, bb))
+
+        // Neutralize ambient lighting casts (pink/warm/cool tints) on paper while keeping saturated cards intact
+        val castNeutralize = 1f - smoothstep(48f, 82f, bgChroma) * 0.80f
+        val minAllowed = max(56f, bgLum * 0.72f)
+        val effR = max(minAllowed, br * castNeutralize + bgLum * (1f - castNeutralize))
+        val effG = max(minAllowed, bg * castNeutralize + bgLum * (1f - castNeutralize))
+        val effB = max(minAllowed, bb * castNeutralize + bgLum * (1f - castNeutralize))
+
+        val gainR = (targetWhite / effR).coerceIn(0.84f, 2.55f)
+        val gainG = (targetWhite / effG).coerceIn(0.84f, 2.55f)
+        val gainB = (targetWhite / effB).coerceIn(0.84f, 2.55f)
+
+        val c = srcPixels[dstRow + x]
+        val r = ((c ushr 16) and 0xFF).toFloat()
+        val g = ((c ushr 8) and 0xFF).toFloat()
+        val b = (c and 0xFF).toFloat()
+
+        val ri = (r * gainR).roundToInt().coerceIn(0, 255)
+        val gi = (g * gainG).roundToInt().coerceIn(0, 255)
+        val bi = (b * gainB).roundToInt().coerceIn(0, 255)
+        out[dstRow + x] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+      }
     }
-    val bgSmallBmp = Bitmap.createBitmap(gridW, gridH, Bitmap.Config.ARGB_8888)
-    bgSmallBmp.setPixels(bgSmallPixels, 0, gridW, 0, 0, gridW, gridH)
-    val bgFullBmp = Bitmap.createScaledBitmap(bgSmallBmp, w, h, true)
-    bgSmallBmp.recycle()
 
-    val srcPixels = IntArray(w * h)
-    val bgFullPixels = IntArray(w * h)
-    src.getPixels(srcPixels, 0, w, 0, 0, w, h)
-    bgFullBmp.getPixels(bgFullPixels, 0, w, 0, 0, w, h)
-    bgFullBmp.recycle()
-
-    val targetWhite = 250f
-    for (i in srcPixels.indices) {
-      val c = srcPixels[i]
-      val r = ((c ushr 16) and 0xFF).toFloat()
-      val g = ((c ushr 8) and 0xFF).toFloat()
-      val b = (c and 0xFF).toFloat()
-
-      val bgC = bgFullPixels[i]
-      val br = ((bgC ushr 16) and 0xFF).toFloat().coerceAtLeast(52f)
-      val bg = ((bgC ushr 8) and 0xFF).toFloat().coerceAtLeast(52f)
-      val bb = (bgC and 0xFF).toFloat().coerceAtLeast(52f)
-
-      val bgLum = (0.299f * br + 0.587f * bg + 0.114f * bb).coerceAtLeast(52f)
-      val bgChroma = max(br, max(bg, bb)) - min(br, min(bg, bb))
-
-      // Neutralize ambient paper color cast on white/tinted paper while preserving saturated colored cards
-      val castNeutralize = 1f - smoothstep(46f, 76f, bgChroma) * 0.78f
-      val effR = br * castNeutralize + bgLum * (1f - castNeutralize)
-      val effG = bg * castNeutralize + bgLum * (1f - castNeutralize)
-      val effB = bb * castNeutralize + bgLum * (1f - castNeutralize)
-
-      val gainR = (targetWhite / effR).coerceIn(0.82f, 2.55f)
-      val gainG = (targetWhite / effG).coerceIn(0.82f, 2.55f)
-      val gainB = (targetWhite / effB).coerceIn(0.82f, 2.55f)
-
-      val ri = (r * gainR).roundToInt().coerceIn(0, 255)
-      val gi = (g * gainG).roundToInt().coerceIn(0, 255)
-      val bi = (b * gainB).roundToInt().coerceIn(0, 255)
-      srcPixels[i] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
-    }
-
-    val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-    out.setPixels(srcPixels, 0, w, 0, 0, w, h)
     return out
+  }
+
+  private fun computeLuminanceArray(pixels: IntArray, w: Int, h: Int): IntArray {
+    val lums = IntArray(w * h)
+    for (i in 0 until w * h) {
+      val c = pixels[i]
+      lums[i] = (((c ushr 16) and 0xFF) * 77 + ((c ushr 8) and 0xFF) * 150 + (c and 0xFF) * 29) ushr 8
+    }
+    return lums
   }
 
   private fun dilate5x5(src: IntArray, w: Int, h: Int): IntArray {
@@ -280,16 +414,16 @@ class ImageProcessor {
     return out
   }
 
-  private fun smoothEnvelope(src: IntArray, w: Int, h: Int): IntArray {
+  private fun smooth3x3Envelope(src: IntArray, w: Int, h: Int): IntArray {
     var cur = src
     repeat(2) {
       val next = IntArray(w * h)
       for (y in 0 until h) {
-        val y0 = max(0, y - 2)
-        val y1 = min(h - 1, y + 2)
+        val y0 = max(0, y - 1)
+        val y1 = min(h - 1, y + 1)
         for (x in 0 until w) {
-          val x0 = max(0, x - 2)
-          val x1 = min(w - 1, x + 2)
+          val x0 = max(0, x - 1)
+          val x1 = min(w - 1, x + 1)
           var sum = 0
           var cnt = 0
           for (yy in y0..y1) {
@@ -307,32 +441,31 @@ class ImageProcessor {
     return cur
   }
 
-  private fun estimatePaperAndInkLevels(pixels: IntArray): Pair<Int, Int> {
+  private fun estimatePaperAndInkLevels(lums: IntArray): Pair<Int, Int> {
     val histogram = IntArray(256)
     var sampled = 0
-    for (i in pixels.indices step 4) {
-      val c = pixels[i]
-      val lum = (((c ushr 16) and 0xFF) * 77 + ((c ushr 8) and 0xFF) * 150 + (c and 0xFF) * 29) ushr 8
-      histogram[lum]++
+    val step = if (lums.size > 4096) 4 else 1
+    for (i in lums.indices step step) {
+      histogram[lums[i].coerceIn(0, 255)]++
       sampled++
     }
     val total = max(1, sampled)
     var acc = 0
-    var p10 = 36
-    var p75 = 236
-    var found10 = false
+    var p04 = 36
+    var p70 = 236
+    var foundLow = false
     for (v in 0..255) {
       acc += histogram[v]
-      if (!found10 && acc >= (total * 0.04).toInt()) {
-        p10 = v.coerceIn(18, 68)
-        found10 = true
+      if (!foundLow && acc >= (total * 0.04).toInt()) {
+        p04 = v.coerceIn(18, 68)
+        foundLow = true
       }
-      if (acc >= (total * 0.72).toInt()) {
-        p75 = v.coerceIn(195, 248)
+      if (acc >= (total * 0.70).toInt()) {
+        p70 = v.coerceIn(195, 248)
         break
       }
     }
-    return p75 to p10
+    return p70 to p04
   }
 
   private fun applyUnsharpMask(
@@ -349,11 +482,11 @@ class ImageProcessor {
       val yp1 = (y + 1) * width
       for (x in 1 until width - 1) {
         val c = pixels[y0 + x]
+        if (c == 0xFFFFFFFF.toInt()) continue
         val r = (c ushr 16) and 0xFF
         val g = (c ushr 8) and 0xFF
         val b = c and 0xFF
 
-        // Cross 5-tap blur approximation (fast & crisp)
         val n1 = pixels[ym1 + x]
         val n2 = pixels[yp1 + x]
         val n3 = pixels[y0 + x - 1]

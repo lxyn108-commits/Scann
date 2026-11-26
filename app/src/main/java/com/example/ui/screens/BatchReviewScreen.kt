@@ -35,6 +35,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.AddAPhoto
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Crop
@@ -419,6 +420,7 @@ fun BatchReviewScreen(
                   Icon(
                     imageVector = when (suggestion) {
                       is PageSuggestion.AutoTrimBorders -> Icons.Filled.Crop
+                      is PageSuggestion.EnableShadowRemoval -> Icons.Filled.AutoFixHigh
                       is PageSuggestion.RotatePage -> Icons.AutoMirrored.Filled.RotateRight
                       is PageSuggestion.ApplyFilter -> Icons.Filled.AutoAwesome
                     },
@@ -426,7 +428,13 @@ fun BatchReviewScreen(
                     modifier = Modifier.size(15.dp),
                   )
                 },
-                label = { Text(suggestion.label) },
+                label = {
+                  Text(
+                    text = suggestion.label,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                },
                 colors = AssistChipDefaults.assistChipColors(
                   containerColor = Color.White.copy(alpha = 0.1f),
                   labelColor = Color.White,

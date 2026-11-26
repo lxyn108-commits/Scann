@@ -151,49 +151,66 @@ object DocumentImageProcessor {
 
   /**
    * Straightens remaining 3D paper curve/sag along top, bottom, left, and right borders
-   * (common on folded receipts photographed on tables) using a 16x16 Canvas bitmap mesh.
+   * (common on folded receipts photographed on tables) using a 16x16 Canvas bitmap mesh,
+   * followed by outer-rim residual corner cleanup.
    */
   private fun straightenCurvedBordersIfNeeded(warped: Bitmap): Bitmap {
-    val gw = 128
-    val gh = max(64, (gw * warped.height.toFloat() / max(1, warped.width)).roundToInt().coerceAtMost(192))
+    val gw = 160
+    val gh = max(64, (gw * warped.height.toFloat() / max(1, warped.width)).roundToInt().coerceAtMost(240))
     val thumb = Bitmap.createScaledBitmap(warped, gw, gh, true)
-    val pixels = IntArray(gw * gh)
-    thumb.getPixels(pixels, 0, gw, 0, 0, gw, gh)
+    val thumbPixels = IntArray(gw * gh)
+    thumb.getPixels(thumbPixels, 0, gw, 0, 0, gw, gh)
     if (thumb !== warped) thumb.recycle()
 
-    val margins = detectCurvedEdgeMargins(pixels, gw, gh, meshDivs = MESH_DIVS)
-    if (!margins.hasAdjustment) return warped
+    val margins = detectCurvedEdgeMargins(thumbPixels, gw, gh, meshDivs = MESH_DIVS)
+    val w = warped.width
+    val h = warped.height
 
-    val w = warped.width.toFloat()
-    val h = warped.height.toFloat()
-    val count = (MESH_DIVS + 1) * (MESH_DIVS + 1)
-    val verts = FloatArray(count * 2)
+    val out = if (margins.hasAdjustment) {
+      val wf = w.toFloat()
+      val hf = h.toFloat()
+      val count = (MESH_DIVS + 1) * (MESH_DIVS + 1)
+      val verts = FloatArray(count * 2)
 
-    var vIdx = 0
-    for (row in 0..MESH_DIVS) {
-      val v = row.toFloat() / MESH_DIVS.toFloat()
-      val xL = margins.leftFrac[row] * w
-      val xR = (1f - margins.rightFrac[row]) * w
-      val xSpan = max(w * 0.65f, xR - xL)
+      var vIdx = 0
+      for (row in 0..MESH_DIVS) {
+        val v = row.toFloat() / MESH_DIVS.toFloat()
+        val xL = margins.leftFrac[row] * wf
+        val xR = (1f - margins.rightFrac[row]) * wf
+        val xSpan = max(wf * 0.55f, xR - xL)
 
-      for (col in 0..MESH_DIVS) {
-        val u = col.toFloat() / MESH_DIVS.toFloat()
-        val yT = margins.topFrac[col] * h
-        val yB = (1f - margins.bottomFrac[col]) * h
-        val ySpan = max(h * 0.65f, yB - yT)
+        for (col in 0..MESH_DIVS) {
+          val u = col.toFloat() / MESH_DIVS.toFloat()
+          val yT = margins.topFrac[col] * hf
+          val yB = (1f - margins.bottomFrac[col]) * hf
+          val ySpan = max(hf * 0.55f, yB - yT)
 
-        val srcX = u * w
-        val srcY = v * h
-        verts[vIdx++] = ((srcX - xL) / xSpan) * w
-        verts[vIdx++] = ((srcY - yT) / ySpan) * h
+          val srcX = u * wf
+          val srcY = v * hf
+          verts[vIdx++] = ((srcX - xL) / xSpan) * wf
+          verts[vIdx++] = ((srcY - yT) / ySpan) * hf
+        }
       }
+
+      val warpedOut = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+      val canvas = Canvas(warpedOut)
+      canvas.drawColor(android.graphics.Color.WHITE)
+      val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+      canvas.drawBitmapMesh(warped, MESH_DIVS, MESH_DIVS, verts, 0, null, 0, paint)
+      warpedOut
+    } else {
+      warped.copy(Bitmap.Config.ARGB_8888, true)
     }
 
-    val out = Bitmap.createBitmap(warped.width, warped.height, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(out)
-    canvas.drawColor(android.graphics.Color.WHITE)
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    canvas.drawBitmapMesh(warped, MESH_DIVS, MESH_DIVS, verts, 0, null, 0, paint)
+    val fullPixels = IntArray(w * h)
+    out.getPixels(fullPixels, 0, w, 0, 0, w, h)
+    val cleaned = cleanResidualDeskCornersBuffer(fullPixels, w, h)
+    if (cleaned) {
+      out.setPixels(fullPixels, 0, w, 0, 0, w, h)
+    } else if (!margins.hasAdjustment) {
+      out.recycle()
+      return warped
+    }
     return out
   }
 
@@ -208,84 +225,107 @@ object DocumentImageProcessor {
       return CurvedBorderMargins(zero, zero, zero, zero, false)
     }
 
-    // Estimate interior document color from center 35%..65% using median-like channel averages
-    val x0 = (width * 0.30f).roundToInt()
-    val x1 = (width * 0.70f).roundToInt()
-    val y0 = (height * 0.30f).roundToInt()
-    val y1 = (height * 0.70f).roundToInt()
-    var sumR = 0L
-    var sumG = 0L
-    var sumB = 0L
-    var brightCount = 0
-    for (yy in y0 until y1) {
-      val ro = yy * width
-      for (xx in x0 until x1) {
-        val c = argbPixels[ro + xx]
-        val r = (c ushr 16) and 0xFF
-        val g = (c ushr 8) and 0xFF
-        val b = c and 0xFF
-        val lum = (r * 77 + g * 150 + b * 29) ushr 8
-        if (lum >= 110) { // avoid dark printed text lowering paper estimate
-          sumR += r
-          sumG += g
-          sumB += b
-          brightCount++
-        }
-      }
-    }
-    if (brightCount < 16) {
-      return CurvedBorderMargins(zero, zero, zero, zero, false)
-    }
-    val paperR = (sumR / brightCount).toInt()
-    val paperG = (sumG / brightCount).toInt()
-    val paperB = (sumB / brightCount).toInt()
-    val paperLum = (paperR * 77 + paperG * 150 + paperB * 29) ushr 8
-
-    fun isDeskPixel(c: Int): Boolean {
-      val r = (c ushr 16) and 0xFF
-      val g = (c ushr 8) and 0xFF
-      val b = c and 0xFF
-      val lum = (r * 77 + g * 150 + b * 29) ushr 8
-      val colorDist = abs(r - paperR) + abs(g - paperG) + abs(b - paperB)
-      val chromaDiff = abs((b - r) - (paperB - paperR)) + abs((g - r) - (paperG - paperR))
-      // Desk pixels differ in BOTH color/hue or clearly sit darker than bright interior paper
-      return (colorDist > 75 && chromaDiff > 28) || (paperLum - lum > 44 && lum < 120)
-    }
+    val (paperR, paperG, paperB, paperLum) = estimateInteriorPaperColor(argbPixels, width, height)
+      ?: return CurvedBorderMargins(zero, zero, zero, zero, false)
 
     val topArr = FloatArray(meshDivs + 1)
     val botArr = FloatArray(meshDivs + 1)
     val leftArr = FloatArray(meshDivs + 1)
     val rightArr = FloatArray(meshDivs + 1)
 
-    val maxScanY = (height * 0.11f).roundToInt().coerceAtLeast(3)
-    val maxScanX = (width * 0.11f).roundToInt().coerceAtLeast(3)
+    val maxScanY = (height * 0.16f).roundToInt().coerceAtLeast(4)
+    val maxScanX = (width * 0.16f).roundToInt().coerceAtLeast(4)
 
     for (col in 0..meshDivs) {
       val px = (col.toFloat() / meshDivs.toFloat() * (width - 1)).roundToInt().coerceIn(0, width - 1)
-      if (isDeskPixel(argbPixels[px])) {
+
+      if (isDeskPixel(argbPixels[px], paperR, paperG, paperB, paperLum) ||
+        isDeskPixel(argbPixels[width + px], paperR, paperG, paperB, paperLum)
+      ) {
         var y = 0
-        while (y < maxScanY && isDeskPixel(argbPixels[y * width + px])) y++
-        if (y < maxScanY) topArr[col] = (y + 0.5f) / height.toFloat()
+        var consecutivePaper = 0
+        var lastDeskY = -1
+        while (y < maxScanY) {
+          if (isDeskPixel(argbPixels[y * width + px], paperR, paperG, paperB, paperLum)) {
+            lastDeskY = y
+            consecutivePaper = 0
+          } else {
+            consecutivePaper++
+            if (consecutivePaper >= 2 && lastDeskY >= 0) break
+          }
+          y++
+        }
+        if (lastDeskY in 0 until (maxScanY - 1)) {
+          topArr[col] = (lastDeskY + 1.2f) / height.toFloat()
+        }
       }
-      if (isDeskPixel(argbPixels[(height - 1) * width + px])) {
+
+      if (isDeskPixel(argbPixels[(height - 1) * width + px], paperR, paperG, paperB, paperLum) ||
+        isDeskPixel(argbPixels[(height - 2) * width + px], paperR, paperG, paperB, paperLum)
+      ) {
         var step = 0
-        while (step < maxScanY && isDeskPixel(argbPixels[(height - 1 - step) * width + px])) step++
-        if (step < maxScanY) botArr[col] = (step + 0.5f) / height.toFloat()
+        var consecutivePaper = 0
+        var lastDeskStep = -1
+        while (step < maxScanY) {
+          if (isDeskPixel(argbPixels[(height - 1 - step) * width + px], paperR, paperG, paperB, paperLum)) {
+            lastDeskStep = step
+            consecutivePaper = 0
+          } else {
+            consecutivePaper++
+            if (consecutivePaper >= 2 && lastDeskStep >= 0) break
+          }
+          step++
+        }
+        if (lastDeskStep in 0 until (maxScanY - 1)) {
+          botArr[col] = (lastDeskStep + 1.2f) / height.toFloat()
+        }
       }
     }
 
     for (row in 0..meshDivs) {
       val py = (row.toFloat() / meshDivs.toFloat() * (height - 1)).roundToInt().coerceIn(0, height - 1)
       val ro = py * width
-      if (isDeskPixel(argbPixels[ro])) {
+
+      if (isDeskPixel(argbPixels[ro], paperR, paperG, paperB, paperLum) ||
+        isDeskPixel(argbPixels[ro + 1], paperR, paperG, paperB, paperLum)
+      ) {
         var x = 0
-        while (x < maxScanX && isDeskPixel(argbPixels[ro + x])) x++
-        if (x < maxScanX) leftArr[row] = (x + 0.5f) / width.toFloat()
+        var consecutivePaper = 0
+        var lastDeskX = -1
+        while (x < maxScanX) {
+          if (isDeskPixel(argbPixels[ro + x], paperR, paperG, paperB, paperLum)) {
+            lastDeskX = x
+            consecutivePaper = 0
+          } else {
+            consecutivePaper++
+            if (consecutivePaper >= 2 && lastDeskX >= 0) break
+          }
+          x++
+        }
+        if (lastDeskX in 0 until (maxScanX - 1)) {
+          leftArr[row] = (lastDeskX + 1.2f) / width.toFloat()
+        }
       }
-      if (isDeskPixel(argbPixels[ro + width - 1])) {
+
+      if (isDeskPixel(argbPixels[ro + width - 1], paperR, paperG, paperB, paperLum) ||
+        isDeskPixel(argbPixels[ro + width - 2], paperR, paperG, paperB, paperLum)
+      ) {
         var step = 0
-        while (step < maxScanX && isDeskPixel(argbPixels[ro + width - 1 - step])) step++
-        if (step < maxScanX) rightArr[row] = (step + 0.5f) / width.toFloat()
+        var consecutivePaper = 0
+        var lastDeskStep = -1
+        while (step < maxScanX) {
+          if (isDeskPixel(argbPixels[ro + width - 1 - step], paperR, paperG, paperB, paperLum)) {
+            lastDeskStep = step
+            consecutivePaper = 0
+          } else {
+            consecutivePaper++
+            if (consecutivePaper >= 2 && lastDeskStep >= 0) break
+          }
+          step++
+        }
+        if (lastDeskStep in 0 until (maxScanX - 1)) {
+          rightArr[row] = (lastDeskStep + 1.2f) / width.toFloat()
+        }
       }
     }
 
@@ -313,8 +353,127 @@ object DocumentImageProcessor {
       bottomFrac = sBot,
       leftFrac = sLeft,
       rightFrac = sRight,
-      hasAdjustment = maxShift >= 0.008f,
+      hasAdjustment = maxShift >= 0.006f,
     )
+  }
+
+  /**
+   * Cleans any remaining outer-rim (~3%) non-paper desk triangles along the document perimeter
+   * after perspective warp & mesh straightening.
+   */
+  internal fun cleanResidualDeskCornersBuffer(
+    argbPixels: IntArray,
+    width: Int,
+    height: Int,
+  ): Boolean {
+    if (width < 32 || height < 32 || argbPixels.size < width * height) return false
+    val paper = estimateInteriorPaperColor(argbPixels, width, height) ?: return false
+    val (paperR, paperG, paperB, paperLum) = paper
+
+    val rimY = (height * 0.032f).roundToInt().coerceIn(2, 44)
+    val rimX = (width * 0.032f).roundToInt().coerceIn(2, 44)
+    var modified = false
+
+    for (y in 0 until height) {
+      val inVerticalRim = y < rimY || y >= height - rimY
+      val rowOff = y * width
+      for (x in 0 until width) {
+        if (!inVerticalRim && x >= rimX && x < width - rimX) continue
+        val idx = rowOff + x
+        if (isDeskPixel(argbPixels[idx], paperR, paperG, paperB, paperLum)) {
+          argbPixels[idx] = 0xFFFFFFFF.toInt()
+          modified = true
+        }
+      }
+    }
+    return modified
+  }
+
+  private data class PaperColorEstimate(val r: Int, val g: Int, val b: Int, val lum: Int)
+
+  private fun estimateInteriorPaperColor(
+    argbPixels: IntArray,
+    width: Int,
+    height: Int,
+  ): PaperColorEstimate? {
+    val x0 = (width * 0.25f).roundToInt()
+    val x1 = (width * 0.75f).roundToInt()
+    val y0 = (height * 0.25f).roundToInt()
+    val y1 = (height * 0.75f).roundToInt()
+
+    var sumR = 0L
+    var sumG = 0L
+    var sumB = 0L
+    var count = 0
+
+    // First pass: neutral bright paper pixels (avoid logos/colored ink)
+    for (yy in y0 until y1) {
+      val ro = yy * width
+      for (xx in x0 until x1) {
+        val c = argbPixels[ro + xx]
+        val r = (c ushr 16) and 0xFF
+        val g = (c ushr 8) and 0xFF
+        val b = c and 0xFF
+        val lum = (r * 77 + g * 150 + b * 29) ushr 8
+        val chroma = max(r, max(g, b)) - min(r, min(g, b))
+        if (lum >= 125 && chroma <= 50) {
+          sumR += r
+          sumG += g
+          sumB += b
+          count++
+        }
+      }
+    }
+
+    // Fallback for colored cards
+    if (count < 16) {
+      sumR = 0L
+      sumG = 0L
+      sumB = 0L
+      count = 0
+      for (yy in y0 until y1) {
+        val ro = yy * width
+        for (xx in x0 until x1) {
+          val c = argbPixels[ro + xx]
+          val r = (c ushr 16) and 0xFF
+          val g = (c ushr 8) and 0xFF
+          val b = c and 0xFF
+          val lum = (r * 77 + g * 150 + b * 29) ushr 8
+          if (lum >= 110) {
+            sumR += r
+            sumG += g
+            sumB += b
+            count++
+          }
+        }
+      }
+    }
+
+    if (count < 16) return null
+    val pr = (sumR / count).toInt()
+    val pg = (sumG / count).toInt()
+    val pb = (sumB / count).toInt()
+    val pLum = (pr * 77 + pg * 150 + pb * 29) ushr 8
+    return PaperColorEstimate(pr, pg, pb, pLum)
+  }
+
+  private fun isDeskPixel(
+    c: Int,
+    paperR: Int,
+    paperG: Int,
+    paperB: Int,
+    paperLum: Int,
+  ): Boolean {
+    val r = (c ushr 16) and 0xFF
+    val g = (c ushr 8) and 0xFF
+    val b = c and 0xFF
+    val lum = (r * 77 + g * 150 + b * 29) ushr 8
+    val colorDist = abs(r - paperR) + abs(g - paperG) + abs(b - paperB)
+    val chromaDiff = abs((b - r) - (paperB - paperR)) + abs((g - r) - (paperG - paperR))
+    val sat = max(r, max(g, b)) - min(r, min(g, b))
+    return (colorDist > 62 && chromaDiff > 22) ||
+      (sat > 42 && colorDist > 50 && lum < paperLum - 15) ||
+      (paperLum - lum > 46 && lum < 142)
   }
 
   suspend fun cropSourceImage(

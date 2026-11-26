@@ -12,6 +12,7 @@ import com.example.domain.model.NormalizedQuad
 import com.example.processing.DocumentActionType
 import com.example.processing.DocumentImageProcessor
 import com.example.processing.DocumentQuadDetector
+import com.example.processing.ImageProcessor
 import com.example.processing.OcrEngine
 import com.example.processing.PageSuggestion
 import com.example.processing.QuadStabilityTracker
@@ -556,5 +557,144 @@ class SearchablePdfAndOcrTest {
     }
     val flatMargins = DocumentImageProcessor.detectCurvedEdgeMargins(flatPixels, w, h, meshDivs = 8)
     assertFalse("Clean flat sheet should not trigger spurious border warp", flatMargins.hasAdjustment)
+  }
+
+  @Test
+  fun imageProcessorBleachesWatermarksAndPinkCreasesWhilePreservingBlackTextAndBlueLogos() {
+    val w = 96
+    val h = 96
+    val pixels = IntArray(w * h)
+
+    for (y in 0 until h) {
+      for (x in 0 until w) {
+        // Paper with pink/gray fold gradient on left/middle
+        val crease = if (x in 18..36) 24 else 0
+        var r = 236 - crease / 2
+        var g = 224 - crease
+        var b = 232 - crease / 2
+
+        // Faint repeating light-blue security watermark across paper
+        if ((x + y) % 14 in 0..2 && y in 12..84) {
+          r = 212
+          g = 228
+          b = 244
+        }
+        pixels[y * w + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+      }
+    }
+
+    // Jet-black body text strokes
+    for (x in 15..75) {
+      pixels[62 * w + x] = (0xFF shl 24) or (54 shl 16) or (54 shl 8) or 58
+      pixels[63 * w + x] = (0xFF shl 24) or (60 shl 16) or (60 shl 8) or 62
+    }
+
+    // Vivid blue brand logo block
+    for (y in 20..30) {
+      for (x in 20..50) {
+        pixels[y * w + x] = (0xFF shl 24) or (34 shl 16) or (106 shl 8) or 208
+      }
+    }
+
+    val out = ImageProcessor().enhanceMagicColorBuffer(pixels, w, h, removeShadowAndGlare = true)
+
+    // Paper & watermark region should bleach to pure #FFFFFF
+    val wmPixel = out[45 * w + 45]
+    assertEquals("Faint watermark should bleach to pure white paper", 0xFFFFFF, wmPixel and 0xFFFFFF)
+
+    // Pink crease region should normalize & bleach cleanly to near/pure white
+    val creasePixel = out[40 * w + 26]
+    val cr = (creasePixel ushr 16) and 0xFF
+    val cg = (creasePixel ushr 8) and 0xFF
+    val cb = creasePixel and 0xFF
+    assertTrue("Crease paper must be clean white (RGB=$cr,$cg,$cb)", cr >= 245 && cg >= 245 && cb >= 245)
+
+    // Black text must compress firmly dark
+    val textPixel = out[62 * w + 40]
+    val textLum = (((textPixel ushr 16) and 0xFF) + ((textPixel ushr 8) and 0xFF) + (textPixel and 0xFF)) / 3
+    assertTrue("Body text must stay dark & sharp (lum=$textLum)", textLum < 55)
+
+    // Blue logo must stay vividly blue (B much stronger than R)
+    val logoPixel = out[25 * w + 35]
+    val lr = (logoPixel ushr 16) and 0xFF
+    val lb = logoPixel and 0xFF
+    assertTrue("Blue logo must remain vivid blue (R=$lr, B=$lb)", lb - lr >= 110)
+  }
+
+  @Test
+  fun documentImageProcessorCleansDeepDeskMarginsAndCornerTriangles() {
+    val w = 96
+    val h = 120
+    val paperWhite = (0xFF shl 24) or (242 shl 16) or (242 shl 8) or 244
+    val greenDesk = (0xFF shl 24) or (78 shl 16) or (122 shl 8) or 86
+
+    // Simulate 14% curved dip along top
+    val deepCurve = IntArray(w * h) { paperWhite }
+    for (x in 0 until w) {
+      val nx = x.toFloat() / (w - 1)
+      val dipPx = (0.14f * kotlin.math.sin(nx * Math.PI).toFloat() * h).toInt()
+      for (y in 0 until dipPx) {
+        deepCurve[y * w + x] = greenDesk
+      }
+    }
+    val margins = DocumentImageProcessor.detectCurvedEdgeMargins(deepCurve, w, h, meshDivs = 8)
+    assertTrue("14% curved dip should be detected", margins.hasAdjustment)
+    assertTrue("Center column top margin=${margins.topFrac[4]} should detect >0.11", margins.topFrac[4] > 0.11f)
+
+    // Simulate tiny residual green corner triangle inside outer 3% perimeter
+    val cornerImg = IntArray(w * h) { paperWhite }
+    cornerImg[0] = greenDesk
+    cornerImg[1] = greenDesk
+    cornerImg[w] = greenDesk
+    val cleaned = DocumentImageProcessor.cleanResidualDeskCornersBuffer(cornerImg, w, h)
+    assertTrue("Residual corner triangle should be cleaned", cleaned)
+    assertEquals(0xFFFFFFFF.toInt(), cornerImg[0])
+    assertEquals(0xFFFFFFFF.toInt(), cornerImg[1])
+  }
+
+  @Test
+  fun smartScanAdvisorRejectsMaskedOcrNoiseSuggestsShadowRemovalAndExtractsIndonesianPhones() {
+    val draft = DraftPage(
+      id = "p_receipt",
+      originalImagePath = "",
+      enhancedImagePath = "",
+      filter = EnhancementFilter.MAGIC_COLOR,
+      removeShadowAndGlare = false,
+      ocrResult = OcrPageResult(
+        formattedText = "a***ka b***y\naca *y\nSEMAR Nusantara\nTELP. (0272) 897479\nTOTAL Rp 575,500.00",
+        lines = listOf(
+          OcrLineBox("a***ka b***y", 0.6f, 0.05f, 0.9f, 0.09f, emptyList()),
+          OcrLineBox("aca *y", 0.6f, 0.10f, 0.8f, 0.13f, emptyList()),
+          OcrLineBox("Rec", 0.1f, 0.12f, 0.2f, 0.15f, emptyList()),
+          OcrLineBox("SEMAR Nusantara", 0.2f, 0.14f, 0.5f, 0.20f, emptyList()),
+        ),
+        imageWidth = 1000,
+        imageHeight = 1400,
+      ),
+    )
+
+    val titles = SmartScanAdvisor.suggestTitles(listOf(draft))
+    assertFalse("Masked PII must not appear in title suggestions: $titles", titles.any { it.contains("*") })
+    assertFalse("Tiny fragment 'Rec' must not appear in title suggestions: $titles", titles.contains("Rec"))
+    assertTrue("Clean store title should be promoted: $titles", titles.contains("SEMAR Nusantara"))
+
+    val pageSuggestions = SmartScanAdvisor.suggestForPage(
+      page = draft,
+      quality = null,
+    )
+    assertTrue(
+      "Should suggest enabling shadow removal when disabled",
+      pageSuggestions.any { it is PageSuggestion.EnableShadowRemoval },
+    )
+
+    val actions = SmartScanAdvisor.extractDocumentActions(draft.ocrResult!!.formattedText)
+    assertTrue(
+      "Should extract Indonesian landline (0272) 897479",
+      actions.any { it.type == DocumentActionType.PHONE && it.value.contains("0272") },
+    )
+    assertTrue(
+      "Should extract Rp 575,500.00",
+      actions.any { it.type == DocumentActionType.AMOUNT && it.value.contains("575,500.00") },
+    )
   }
 }
