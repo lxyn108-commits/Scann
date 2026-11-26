@@ -88,9 +88,11 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.domain.model.DraftPage
 import com.example.domain.model.NormalizedQuad
+import com.example.processing.CameraCoachAction
 import com.example.processing.DocumentQuadDetector
 import com.example.processing.QuadStabilityTracker
 import com.example.processing.ScanPreset
+import com.example.processing.SmartScanAdvisor
 import com.example.ui.components.CameraPermissionPrompt
 import com.example.ui.components.DocumentQuadOverlay
 import com.example.ui.theme.LocalClearScanColors
@@ -205,6 +207,8 @@ private fun CameraViewfinderContent(
   var detectedQuad by remember { mutableStateOf<NormalizedQuad?>(null) }
   var analysisFrameSize by remember { mutableStateOf(480 to 640) }
   var stabilityProgress by remember { mutableFloatStateOf(0f) }
+  var sceneMeanLuma by remember { mutableFloatStateOf(140f) }
+  var sceneEdgeClipped by remember { mutableStateOf(false) }
 
   val currentAutoEnabled by rememberUpdatedState(autoCaptureEnabled)
   val currentProcessing by rememberUpdatedState(isProcessingCapture)
@@ -270,9 +274,13 @@ private fun CameraViewfinderContent(
       analysisExecutor,
       ImageAnalysis.Analyzer { imageProxy ->
         val now = SystemClock.elapsedRealtime()
-        val (rawQuad, uprightDims) = runCatching {
-          DocumentQuadDetector.detectFromImageProxy(imageProxy)
-        }.getOrDefault(null to (imageProxy.width to imageProxy.height))
+        val diag = runCatching {
+          DocumentQuadDetector.detectFromImageProxyWithDiagnostics(imageProxy)
+        }.getOrNull()
+        val rawQuad = diag?.quad
+        val uprightDims = diag?.uprightDims ?: (imageProxy.width to imageProxy.height)
+        val frameLuma = diag?.meanLuma ?: 140f
+        val frameClipped = diag?.edgeClipped ?: false
 
         val autoReady = stabilityTracker.update(rawQuad, now)
         val smoothed = stabilityTracker.smoothedQuad
@@ -282,6 +290,8 @@ private fun CameraViewfinderContent(
           analysisFrameSize = uprightDims
           detectedQuad = smoothed
           stabilityProgress = progress
+          sceneMeanLuma = frameLuma
+          sceneEdgeClipped = frameClipped
           if (autoReady && currentAutoEnabled && !currentProcessing) {
             triggerCapture(smoothed, currentRetaking)
           }
@@ -436,6 +446,69 @@ private fun CameraViewfinderContent(
             contentDescription = "Nyalakan senter",
             tint = Color.White,
           )
+        }
+      }
+    }
+
+    // Live Smart Camera Coaching Pill (low-light auto-torch, edge framing, hold-steady hints)
+    val coachHint = SmartScanAdvisor.suggestCameraCoaching(
+      quad = activeQuad,
+      meanLuma = sceneMeanLuma,
+      isTorchOn = isTorchOn,
+      edgeClipped = sceneEdgeClipped,
+      stabilityProgress = stabilityProgress,
+      liveOcrLines = liveOcrLines,
+    )
+    AnimatedVisibility(
+      visible = coachHint != null && !isProcessingCapture,
+      enter = fadeIn(),
+      exit = fadeOut(),
+      modifier = Modifier
+        .align(Alignment.TopCenter)
+        .statusBarsPadding()
+        .padding(top = 68.dp, start = 20.dp, end = 20.dp),
+    ) {
+      if (coachHint != null) {
+        Surface(
+          shape = RoundedCornerShape(50),
+          color = Color.Black.copy(alpha = 0.62f),
+          border = BorderStroke(
+            1.dp,
+            if (coachHint.action == CameraCoachAction.ENABLE_TORCH) {
+              Color(0xFFFBBF24).copy(alpha = 0.75f)
+            } else {
+              Color.White.copy(alpha = 0.30f)
+            },
+          ),
+          modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .clickable(enabled = coachHint.action == CameraCoachAction.ENABLE_TORCH) {
+              isTorchOn = true
+              cameraController.enableTorch(true)
+            }
+            .testTag("camera_coach_pill"),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Icon(
+              imageVector = if (coachHint.action == CameraCoachAction.ENABLE_TORCH) {
+                Icons.Filled.FlashlightOn
+              } else {
+                Icons.Filled.AutoAwesome
+              },
+              contentDescription = null,
+              tint = if (coachHint.action == CameraCoachAction.ENABLE_TORCH) Color(0xFFFBBF24) else Color.White,
+              modifier = Modifier.size(15.dp),
+            )
+            Text(
+              text = coachHint.message,
+              style = MaterialTheme.typography.labelMedium,
+              color = Color.White,
+            )
+          }
         }
       }
     }

@@ -9,6 +9,7 @@ import com.example.domain.model.OcrPageResult
 import com.example.domain.model.OcrWordBox
 import com.example.domain.model.NormalizedPoint
 import com.example.domain.model.NormalizedQuad
+import com.example.processing.CameraCoachAction
 import com.example.processing.DocumentActionType
 import com.example.processing.DocumentImageProcessor
 import com.example.processing.DocumentQuadDetector
@@ -839,5 +840,96 @@ class SearchablePdfAndOcrTest {
       "Should extract Rp 575,500.00",
       actions.any { it.type == DocumentActionType.AMOUNT && it.value.contains("575,500.00") },
     )
+  }
+
+  @Test
+  fun smartScanAdvisorDetectsSidewaysOrientationReceiptFilterAndCameraCoaching() {
+    val sidewaysDraft = DraftPage(
+      id = "p_sideways",
+      originalImagePath = "",
+      enhancedImagePath = "",
+      filter = EnhancementFilter.MAGIC_COLOR,
+      removeShadowAndGlare = true,
+      ocrResult = OcrPageResult(
+        formattedText = "STRUK PEMBELIAN\nTOTAL Rp 120.000\nTUNAI Rp 150.000\nKEMBALIAN Rp 30.000",
+        lines = listOf(
+          OcrLineBox("STRUK PEMBELIAN", 0.2f, 0.2f, 0.3f, 0.5f, List(2) { OcrWordBox("w", 0f, 0f, 0.1f, 0.1f) }, angleDegrees = 90f),
+          OcrLineBox("TOTAL Rp 120.000", 0.4f, 0.2f, 0.5f, 0.5f, List(3) { OcrWordBox("w", 0f, 0f, 0.1f, 0.1f) }, angleDegrees = 91f),
+          OcrLineBox("TUNAI Rp 150.000", 0.6f, 0.2f, 0.7f, 0.5f, List(3) { OcrWordBox("w", 0f, 0f, 0.1f, 0.1f) }, angleDegrees = 89f),
+        ),
+        imageWidth = 1000,
+        imageHeight = 1400,
+      ),
+    )
+
+    val encoded = OcrJsonSerializer.encodeLines(sidewaysDraft.ocrResult!!.lines)
+    val decoded = OcrJsonSerializer.decodeLines(encoded)
+    assertEquals(90f, decoded[0].angleDegrees, 0.01f)
+
+    val suggestions = SmartScanAdvisor.suggestForPage(
+      page = sidewaysDraft,
+      quality = DocumentImageProcessor.ImageQualityAnalysis(
+        meanLuminance = 158f,
+        contrastSpread = 110f,
+        suggestedTrimRect = null,
+      ),
+    )
+    val rotateSug = suggestions.filterIsInstance<PageSuggestion.RotatePage>().firstOrNull()
+    assertNotNull("Sideways OCR text (+90deg) must suggest 270deg clockwise fix", rotateSug)
+    assertEquals(3, rotateSug!!.quarterTurns)
+    assertTrue("Receipt with moderate contrast should suggest B&W receipt mode", suggestions.any {
+      it is PageSuggestion.ApplyFilter && it.filter == EnhancementFilter.CRISP_BW
+    })
+
+    val dimCoach = SmartScanAdvisor.suggestCameraCoaching(
+      quad = null,
+      meanLuma = 54f,
+      isTorchOn = false,
+      edgeClipped = false,
+      stabilityProgress = 0f,
+      liveOcrLines = 0,
+    )
+    assertEquals(CameraCoachAction.ENABLE_TORCH, dimCoach?.action)
+
+    val clipCoach = SmartScanAdvisor.suggestCameraCoaching(
+      quad = NormalizedQuad.FULL,
+      meanLuma = 160f,
+      isTorchOn = false,
+      edgeClipped = true,
+      stabilityProgress = 0.2f,
+      liveOcrLines = 4,
+    )
+    assertNotNull(clipCoach)
+    assertTrue(clipCoach!!.message.contains("sudut", ignoreCase = true))
+  }
+
+  @Test
+  fun imageProcessorSuppressesPaperGrainAndRingingHalos() {
+    val w = 80
+    val h = 80
+    val whitePaper = (0xFF shl 24) or (232 shl 16) or (232 shl 8) or 234
+    val faintGrain = (0xFF shl 24) or (208 shl 16) or (208 shl 8) or 210
+    val darkStroke = (0xFF shl 24) or (42 shl 16) or (42 shl 8) or 46
+    val pixels = IntArray(w * h) { i ->
+      val x = i % w
+      val y = i / w
+      when {
+        y in 38..40 && x in 20..60 -> darkStroke
+        (x + y) % 5 == 0 -> faintGrain // subtle paper texture/crease grain
+        else -> whitePaper
+      }
+    }
+
+    val out = ImageProcessor().enhanceMagicColorBuffer(pixels, w, h, removeShadowAndGlare = false)
+    // Grain pixel in white background must bleach cleanly to pure #FFFFFF instead of darkening to gray scratches
+    val grainSample = out[10 * w + 10]
+    assertEquals("Faint paper grain should bleach to pure white", 0xFFFFFF, grainSample and 0xFFFFFF)
+
+    // Neighbor immediately above dark stroke must NOT develop bright/dark ringing halo
+    val borderPaper = out[37 * w + 40]
+    val r = (borderPaper ushr 16) and 0xFF
+    val g = (borderPaper ushr 8) and 0xFF
+    val b = borderPaper and 0xFF
+    assertTrue("Paper immediately adjacent to dark stroke must stay clean white (RGB=$r,$g,$b)", r >= 245 && g >= 245 && b >= 245)
   }
 }

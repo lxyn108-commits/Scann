@@ -274,13 +274,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     when (suggestion) {
       is PageSuggestion.ApplyFilter -> applyFilterToSelectedPage(suggestion.filter)
       is PageSuggestion.AutoTrimBorders -> cropSelectedPage(suggestion.cropRect)
+      is PageSuggestion.AutoStraighten -> autoStraightenSelectedPage()
       is PageSuggestion.EnableShadowRemoval -> {
         val target = _batchState.value.pages.getOrNull(_batchState.value.selectedPageIndex)
         if (target != null && !target.removeShadowAndGlare) {
           toggleShadowRemovalForSelectedPage()
         }
       }
-      is PageSuggestion.RotatePage -> rotateSelectedPage()
+      is PageSuggestion.RotatePage -> rotateSelectedPage(suggestion.quarterTurns)
     }
   }
 
@@ -297,12 +298,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       var nextRotation = target.rotationDegrees
       var nextShadowRemoval = target.removeShadowAndGlare
       var trimRect: com.example.domain.model.NormalizedCropRect? = null
+      var redetectQuad: NormalizedQuad? = null
 
       for (suggestion in suggestions) {
         when (suggestion) {
           is PageSuggestion.AutoTrimBorders -> trimRect = suggestion.cropRect
+          is PageSuggestion.AutoStraighten -> {
+            val rawFile = File(target.rawImagePath).takeIf { it.exists() } ?: File(target.originalImagePath)
+            redetectQuad = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+              runCatching {
+                val bmp = DocumentImageProcessor.decodeSampledBitmap(rawFile.absolutePath, 480)
+                com.example.processing.DocumentQuadDetector.detectFromBitmap(bmp, 320).also { bmp.recycle() }
+              }.getOrNull()
+            }
+          }
           is PageSuggestion.EnableShadowRemoval -> nextShadowRemoval = true
-          is PageSuggestion.RotatePage -> nextRotation = (nextRotation + 90) % 360
+          is PageSuggestion.RotatePage -> nextRotation = (nextRotation + 90 * suggestion.quarterTurns) % 360
           is PageSuggestion.ApplyFilter -> nextFilter = suggestion.filter
         }
       }
@@ -316,13 +327,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           page = working,
           filter = nextFilter,
           rotationDegrees = nextRotation,
-          cropRect = trimRect,
+          cropRect = if (redetectQuad == null) trimRect else null,
+          quad = redetectQuad,
           removeShadowAndGlare = nextShadowRemoval,
         )
       }.getOrElse { working.copy(isProcessing = false) }
 
       replacePageById(working)
       refreshSuggestionsForPage(working)
+    }
+  }
+
+  private fun autoStraightenSelectedPage() {
+    val state = _batchState.value
+    val target = state.pages.getOrNull(state.selectedPageIndex) ?: return
+    if (target.isProcessing) return
+
+    viewModelScope.launch {
+      setPageProcessing(target.id, true)
+      val rawFile = File(target.rawImagePath).takeIf { it.exists() } ?: File(target.originalImagePath)
+      val redetected = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+        runCatching {
+          val bmp = DocumentImageProcessor.decodeSampledBitmap(rawFile.absolutePath, 480)
+          com.example.processing.DocumentQuadDetector.detectFromBitmap(bmp, 320).also { bmp.recycle() }
+        }.getOrNull()
+      }
+      val updated = if (redetected != null && redetected.isConvexValid(minArea = 0.04f)) {
+        runCatching { repository.reprocessPage(target, quad = redetected) }
+          .getOrElse { target.copy(isProcessing = false) }
+      } else {
+        target.copy(isProcessing = false)
+      }
+      replacePageById(updated)
+      refreshSuggestionsForPage(updated)
     }
   }
 
@@ -364,14 +401,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  fun rotateSelectedPage() {
+  fun rotateSelectedPage(quarterTurns: Int = 1) {
     val state = _batchState.value
     val target = state.pages.getOrNull(state.selectedPageIndex) ?: return
     if (target.isProcessing) return
 
     viewModelScope.launch {
       setPageProcessing(target.id, true)
-      val nextRot = (target.rotationDegrees + 90) % 360
+      val nextRot = (target.rotationDegrees + 90 * quarterTurns) % 360
       val updated = runCatching {
         repository.reprocessPage(target, rotationDegrees = nextRot)
       }.getOrElse { target.copy(isProcessing = false) }

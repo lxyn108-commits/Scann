@@ -123,6 +123,7 @@ data class OcrLineBox(
   val right: Float,
   val bottom: Float,
   val words: List<OcrWordBox>,
+  val angleDegrees: Float = 0f,
 )
 
 data class OcrPageResult(
@@ -157,7 +158,7 @@ object OcrJsonSerializer {
       val wordsPart = line.words.joinToString(",") { w ->
         "${enc(w.text)}:${w.left}:${w.top}:${w.right}:${w.bottom}"
       }
-      "${enc(line.text)}|${line.left}|${line.top}|${line.right}|${line.bottom}|$wordsPart"
+      "${enc(line.text)}|${line.left}|${line.top}|${line.right}|${line.bottom}|$wordsPart|${line.angleDegrees}"
     }
   }
 
@@ -190,6 +191,7 @@ object OcrJsonSerializer {
           right = parts[3].toFloatOrNull() ?: 0f,
           bottom = parts[4].toFloatOrNull() ?: 0f,
           words = words,
+          angleDegrees = parts.getOrNull(6)?.toFloatOrNull() ?: 0f,
         )
       }
     }.getOrDefault(emptyList())

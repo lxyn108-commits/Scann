@@ -79,10 +79,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import android.content.Intent
+import android.net.Uri
 import com.example.domain.model.DraftPage
 import com.example.domain.model.EnhancementFilter
 import com.example.domain.model.NormalizedQuad
+import com.example.processing.DocumentActionType
+import com.example.processing.DocumentImageProcessor
+import com.example.processing.DocumentQuadDetector
 import com.example.processing.PageSuggestion
+import com.example.processing.SmartScanAdvisor
 import com.example.ui.BatchReviewUiState
 import com.example.ui.components.CircularFilterSelectorRow
 import com.example.ui.components.EditStudioActionStrip
@@ -90,7 +96,9 @@ import com.example.ui.components.ExtractedTextModalSheet
 import com.example.ui.components.InteractivePerspectiveOverlay
 import com.example.ui.components.ScannedPagePreview
 import com.example.ui.theme.LocalClearScanColors
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @Composable
@@ -246,6 +254,55 @@ fun BatchReviewScreen(
           verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
           if (isStraightening) {
+            val rawForDetect = currentPage?.let {
+              File(it.rawImagePath).takeIf { f -> f.exists() }?.absolutePath ?: it.originalImagePath
+            }
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              OutlinedButton(
+                onClick = {
+                  if (rawForDetect != null) {
+                    scope.launch {
+                      val auto = withContext(Dispatchers.Default) {
+                        runCatching {
+                          val bmp = DocumentImageProcessor.decodeSampledBitmap(rawForDetect, 480)
+                          DocumentQuadDetector.detectFromBitmap(bmp, 320).also { bmp.recycle() }
+                        }.getOrNull()
+                      }
+                      if (auto != null && auto.isConvexValid(minArea = 0.04f)) {
+                        editingQuad = auto
+                      }
+                    }
+                  }
+                },
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                modifier = Modifier
+                  .weight(1f)
+                  .height(42.dp)
+                  .testTag("auto_detect_quad_button"),
+                shape = RoundedCornerShape(12.dp),
+              ) {
+                Icon(Icons.Filled.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Deteksi Otomatis", maxLines = 1, overflow = TextOverflow.Ellipsis)
+              }
+
+              OutlinedButton(
+                onClick = { editingQuad = NormalizedQuad.FULL },
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                modifier = Modifier
+                  .height(42.dp)
+                  .testTag("reset_full_quad_button"),
+                shape = RoundedCornerShape(12.dp),
+              ) {
+                Text("Penuh")
+              }
+            }
+
             Row(
               modifier = Modifier.fillMaxWidth(),
               horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -388,8 +445,12 @@ fun BatchReviewScreen(
           )
         }
 
-        // Smart Title or Quality Suggestions Row
-        if ((state.suggestedTitles.isNotEmpty() || currentSuggestions.isNotEmpty()) && !isStraightening) {
+        // Smart Title, Quality Fixes, & Actionable Data Suggestions Row
+        val context = LocalContext.current
+        val pageActions = remember(currentPage?.id, currentPage?.ocrResult?.formattedText) {
+          SmartScanAdvisor.extractDocumentActions(currentPage?.ocrResult?.formattedText.orEmpty())
+        }
+        if ((state.suggestedTitles.isNotEmpty() || currentSuggestions.isNotEmpty() || pageActions.isNotEmpty()) && !isStraightening) {
           LazyRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(horizontal = 2.dp),
@@ -422,6 +483,7 @@ fun BatchReviewScreen(
                   Icon(
                     imageVector = when (suggestion) {
                       is PageSuggestion.AutoTrimBorders -> Icons.Filled.Crop
+                      is PageSuggestion.AutoStraighten -> Icons.Filled.Crop
                       is PageSuggestion.EnableShadowRemoval -> Icons.Filled.AutoFixHigh
                       is PageSuggestion.RotatePage -> Icons.AutoMirrored.Filled.RotateRight
                       is PageSuggestion.ApplyFilter -> Icons.Filled.AutoAwesome
@@ -443,6 +505,42 @@ fun BatchReviewScreen(
                   leadingIconContentColor = MaterialTheme.colorScheme.secondary,
                 ),
                 modifier = Modifier.testTag("page_suggestion_$idx"),
+              )
+            }
+            itemsIndexed(pageActions) { idx, action ->
+              AssistChip(
+                onClick = {
+                  when (action.type) {
+                    DocumentActionType.EMAIL -> {
+                      val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:${action.value}"))
+                      runCatching { context.startActivity(intent) }
+                        .onFailure { onCopyText("Email", action.value) }
+                    }
+                    DocumentActionType.URL -> {
+                      val intent = Intent(Intent.ACTION_VIEW, Uri.parse(action.value))
+                      runCatching { context.startActivity(intent) }
+                        .onFailure { onCopyText("URL", action.value) }
+                    }
+                    DocumentActionType.PHONE -> {
+                      val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${action.value}"))
+                      runCatching { context.startActivity(intent) }
+                        .onFailure { onCopyText("Telepon", action.value) }
+                    }
+                    DocumentActionType.AMOUNT -> onCopyText("Nominal", action.value)
+                  }
+                },
+                label = {
+                  Text(
+                    text = action.displayLabel,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                },
+                colors = AssistChipDefaults.assistChipColors(
+                  containerColor = Color.White.copy(alpha = 0.08f),
+                  labelColor = Color.White,
+                ),
+                modifier = Modifier.testTag("batch_smart_action_$idx"),
               )
             }
             itemsIndexed(state.suggestedTitles) { idx, candidate ->

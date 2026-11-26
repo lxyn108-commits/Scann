@@ -34,6 +34,11 @@ sealed class PageSuggestion(
     val cropRect: NormalizedCropRect,
   ) : PageSuggestion(label, reason)
 
+  data class AutoStraighten(
+    override val label: String,
+    override val reason: String,
+  ) : PageSuggestion(label, reason)
+
   data class EnableShadowRemoval(
     override val label: String,
     override val reason: String,
@@ -42,8 +47,19 @@ sealed class PageSuggestion(
   data class RotatePage(
     override val label: String,
     override val reason: String,
+    val quarterTurns: Int = 1,
   ) : PageSuggestion(label, reason)
 }
+
+enum class CameraCoachAction {
+  NONE,
+  ENABLE_TORCH,
+}
+
+data class CameraCoachHint(
+  val message: String,
+  val action: CameraCoachAction = CameraCoachAction.NONE,
+)
 
 enum class DocumentActionType {
   EMAIL,
@@ -133,16 +149,27 @@ object SmartScanAdvisor {
     quality: DocumentImageProcessor.ImageQualityAnalysis?,
   ): List<PageSuggestion> {
     val suggestions = mutableListOf<PageSuggestion>()
-    val wordCount = page.ocrResult?.lines?.sumOf { it.words.size } ?: 0
+    val lines = page.ocrResult?.lines.orEmpty()
+    val wordCount = lines.sumOf { it.words.size }
+    val lowerText = page.ocrResult?.formattedText.orEmpty().lowercase(Locale.ROOT)
 
-    if (page.quad.isFullImage && quality?.suggestedTrimRect != null) {
-      suggestions.add(
-        PageSuggestion.AutoTrimBorders(
-          label = "Rapikan Tepi",
-          reason = "Tepi meja terdeteksi di pinggir halaman",
-          cropRect = quality.suggestedTrimRect,
+    if (quality?.suggestedTrimRect != null) {
+      if (page.quad.isFullImage) {
+        suggestions.add(
+          PageSuggestion.AutoTrimBorders(
+            label = "Rapikan Tepi",
+            reason = "Tepi meja terdeteksi di pinggir halaman",
+            cropRect = quality.suggestedTrimRect,
+          )
         )
-      )
+      } else {
+        suggestions.add(
+          PageSuggestion.AutoStraighten(
+            label = "Luruskan Ulang",
+            reason = "Sudut dokumen bisa dipaskan lebih rapi",
+          )
+        )
+      }
     }
 
     if (!page.removeShadowAndGlare) {
@@ -153,6 +180,21 @@ object SmartScanAdvisor {
         )
       )
     }
+
+    val quarterTurnsNeeded = detectNeededQuarterTurns(lines, wordCount)
+    if (quarterTurnsNeeded != null) {
+      val deg = quarterTurnsNeeded * 90
+      suggestions.add(
+        PageSuggestion.RotatePage(
+          label = "Putar $deg°",
+          reason = if (wordCount <= 4) "Teks sedikit — periksa orientasi" else "Teks terdeteksi miring $deg°",
+          quarterTurns = quarterTurnsNeeded,
+        )
+      )
+    }
+
+    val isReceiptLike = "total" in lowerText || "struk" in lowerText ||
+      "kembalian" in lowerText || "tunai" in lowerText || "nota" in lowerText
 
     if (quality != null && (quality.contrastSpread < 95f || quality.meanLuminance < 135f) &&
       page.filter != EnhancementFilter.CRISP_BW
@@ -172,18 +214,59 @@ object SmartScanAdvisor {
           filter = EnhancementFilter.MAGIC_COLOR,
         )
       )
-    }
-
-    if (wordCount in 0..4) {
+    } else if (isReceiptLike && page.filter != EnhancementFilter.CRISP_BW &&
+      quality != null && quality.contrastSpread < 120f
+    ) {
       suggestions.add(
-        PageSuggestion.RotatePage(
-          label = "Putar 90°",
-          reason = "Teks sedikit — periksa orientasi",
+        PageSuggestion.ApplyFilter(
+          label = "Hitam Putih Struk",
+          reason = "Optimalkan teks struk termal agar ekstra tajam",
+          filter = EnhancementFilter.CRISP_BW,
         )
       )
     }
 
     return suggestions.take(4)
+  }
+
+  private fun detectNeededQuarterTurns(lines: List<com.example.domain.model.OcrLineBox>, wordCount: Int): Int? {
+    if (lines.size >= 2) {
+      val angles = lines.map { it.angleDegrees }.sorted()
+      val medianAngle = angles[angles.size / 2]
+      return when {
+        medianAngle in -115f..-65f -> 1 // text tilted -90deg (left-to-bottom), rotate +90deg clockwise
+        medianAngle in 65f..115f -> 3 // text tilted +90deg, rotate +270deg clockwise
+        kotlin.math.abs(medianAngle) >= 155f -> 2 // upside-down text
+        else -> null
+      }
+    }
+    return if (wordCount in 0..4) 1 else null
+  }
+
+  fun suggestCameraCoaching(
+    quad: com.example.domain.model.NormalizedQuad?,
+    meanLuma: Float,
+    isTorchOn: Boolean,
+    edgeClipped: Boolean,
+    stabilityProgress: Float,
+    liveOcrLines: Int,
+  ): CameraCoachHint? {
+    return when {
+      meanLuma < 74f && !isTorchOn -> CameraCoachHint(
+        message = "Cahaya redup • Nyalakan senter",
+        action = CameraCoachAction.ENABLE_TORCH,
+      )
+      edgeClipped -> CameraCoachHint(
+        message = "Mundur sedikit agar 4 sudut terlihat",
+      )
+      quad != null && stabilityProgress in 0.25f..0.99f -> CameraCoachHint(
+        message = "Tahan stabil untuk memindai otomatis…",
+      )
+      quad == null && liveOcrLines >= 3 -> CameraCoachHint(
+        message = "Teks terbaca • Arahkan seluruh kertas ke dalam bingkai",
+      )
+      else -> null
+    }
   }
 
   fun extractDocumentActions(ocrText: String): List<DocumentActionSuggestion> {

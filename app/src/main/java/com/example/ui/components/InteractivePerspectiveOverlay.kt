@@ -17,23 +17,30 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.domain.model.NormalizedPoint
 import com.example.domain.model.NormalizedQuad
+import com.example.processing.DocumentImageProcessor
 import com.example.ui.theme.LocalClearScanColors
 import java.io.File
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 private enum class QuadHandle {
   TOP_LEFT,
@@ -59,6 +66,11 @@ fun InteractivePerspectiveOverlay(
     val w = opts.outWidth.takeIf { it > 0 } ?: 1000
     val h = opts.outHeight.takeIf { it > 0 } ?: 1400
     w to h
+  }
+  val loupeBitmap: ImageBitmap? = remember(rawImagePath) {
+    runCatching {
+      DocumentImageProcessor.decodeSampledBitmap(rawImagePath, 1100).asImageBitmap()
+    }.getOrNull()
   }
   val aspectRatio = remember(rawDims) {
     rawDims.first.toFloat() / rawDims.second.toFloat()
@@ -227,6 +239,70 @@ fun InteractivePerspectiveOverlay(
             radius = radius,
             center = pt,
             style = Stroke(width = 2.8.dp.toPx()),
+          )
+        }
+
+        // Live 2.6x Corner Precision Magnifier Loupe when dragging
+        val dragging = activeHandle
+        if (dragging != null && loupeBitmap != null) {
+          val targetNorm = when (dragging) {
+            QuadHandle.TOP_LEFT -> latestQuad.topLeft
+            QuadHandle.TOP_RIGHT -> latestQuad.topRight
+            QuadHandle.BOTTOM_RIGHT -> latestQuad.bottomRight
+            QuadHandle.BOTTOM_LEFT -> latestQuad.bottomLeft
+          }
+          val loupeRadius = 46.dp.toPx()
+          val loupeMargin = 14.dp.toPx() + loupeRadius
+          val loupeX = if (targetNorm.x < 0.5f) (w - loupeMargin) else loupeMargin
+          val loupeCenter = Offset(loupeX.coerceIn(loupeRadius, w - loupeRadius), loupeMargin.coerceAtMost(h * 0.5f))
+
+          val sampleHalfW = (loupeBitmap.width * 0.11f).roundToInt().coerceAtLeast(16)
+          val sampleHalfH = (loupeBitmap.height * 0.11f).roundToInt().coerceAtLeast(16)
+          val cxPx = (targetNorm.x * loupeBitmap.width).roundToInt().coerceIn(0, loupeBitmap.width - 1)
+          val cyPx = (targetNorm.y * loupeBitmap.height).roundToInt().coerceIn(0, loupeBitmap.height - 1)
+          val srcLeft = (cxPx - sampleHalfW).coerceIn(0, (loupeBitmap.width - 2 * sampleHalfW).coerceAtLeast(0))
+          val srcTop = (cyPx - sampleHalfH).coerceIn(0, (loupeBitmap.height - 2 * sampleHalfH).coerceAtLeast(0))
+          val srcW = (sampleHalfW * 2).coerceAtMost(loupeBitmap.width - srcLeft)
+          val srcH = (sampleHalfH * 2).coerceAtMost(loupeBitmap.height - srcTop)
+
+          val clipCircle = Path().apply {
+            addOval(
+              androidx.compose.ui.geometry.Rect(
+                loupeCenter.x - loupeRadius,
+                loupeCenter.y - loupeRadius,
+                loupeCenter.x + loupeRadius,
+                loupeCenter.y + loupeRadius,
+              )
+            )
+          }
+          clipPath(clipCircle) {
+            drawImage(
+              image = loupeBitmap,
+              srcOffset = IntOffset(srcLeft, srcTop),
+              srcSize = IntSize(srcW, srcH),
+              dstOffset = IntOffset((loupeCenter.x - loupeRadius).roundToInt(), (loupeCenter.y - loupeRadius).roundToInt()),
+              dstSize = IntSize((loupeRadius * 2).roundToInt(), (loupeRadius * 2).roundToInt()),
+            )
+            // Precision crosshair inside loupe
+            val crossHalf = 14.dp.toPx()
+            drawLine(
+              color = primaryColor,
+              start = Offset(loupeCenter.x - crossHalf, loupeCenter.y),
+              end = Offset(loupeCenter.x + crossHalf, loupeCenter.y),
+              strokeWidth = 2.dp.toPx(),
+            )
+            drawLine(
+              color = primaryColor,
+              start = Offset(loupeCenter.x, loupeCenter.y - crossHalf),
+              end = Offset(loupeCenter.x, loupeCenter.y + crossHalf),
+              strokeWidth = 2.dp.toPx(),
+            )
+          }
+          drawCircle(
+            color = Color.White,
+            radius = loupeRadius,
+            center = loupeCenter,
+            style = Stroke(width = 3.dp.toPx()),
           )
         }
       }

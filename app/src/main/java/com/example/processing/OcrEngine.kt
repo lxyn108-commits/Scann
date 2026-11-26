@@ -66,6 +66,7 @@ object OcrEngine {
           right = (box.right / w).coerceIn(0f, 1f),
           bottom = (box.bottom / h).coerceIn(0f, 1f),
           words = words,
+          angleDegrees = line.angle,
         )
       }
     }

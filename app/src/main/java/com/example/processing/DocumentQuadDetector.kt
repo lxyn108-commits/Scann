@@ -36,7 +36,19 @@ object DocumentQuadDetector {
   private data class LineCandidate(val theta: Float, val rho: Float, val score: Float, val centerPos: Float)
   private data class YuvSample(val y: Int, val u: Int, val v: Int)
 
+  data class FrameDiagnostics(
+    val quad: NormalizedQuad?,
+    val uprightDims: Pair<Int, Int>,
+    val meanLuma: Float,
+    val edgeClipped: Boolean,
+  )
+
   fun detectFromImageProxy(imageProxy: ImageProxy, targetMaxSide: Int = 160): Pair<NormalizedQuad?, Pair<Int, Int>> {
+    val diag = detectFromImageProxyWithDiagnostics(imageProxy, targetMaxSide)
+    return diag.quad to diag.uprightDims
+  }
+
+  fun detectFromImageProxyWithDiagnostics(imageProxy: ImageProxy, targetMaxSide: Int = 160): FrameDiagnostics {
     val planes = imageProxy.planes
     val yPlane = planes[0]
     val srcW = imageProxy.width
@@ -65,6 +77,7 @@ object DocumentQuadDetector {
     val yArr = IntArray(gridW * gridH)
     val uArr = if (hasChroma) IntArray(gridW * gridH) else null
     val vArr = if (hasChroma) IntArray(gridW * gridH) else null
+    var sumY = 0L
 
     for (gy in 0 until gridH) {
       val uy = ((gy + 0.5f) / gridH * uprightH).toInt().coerceIn(0, uprightH - 1)
@@ -78,7 +91,9 @@ object DocumentQuadDetector {
           else -> ux to uy
         }
         val yIdx = (sy * yRowStride + sx * yPixelStride).coerceIn(0, yCap - 1)
-        yArr[rowOffset + gx] = yBuf.get(yIdx).toInt() and 0xFF
+        val yVal = yBuf.get(yIdx).toInt() and 0xFF
+        yArr[rowOffset + gx] = yVal
+        sumY += yVal
 
         if (uArr != null && vArr != null && uPlane != null && vPlane != null && uBuf != null && vBuf != null) {
           val cx = sx / 2
@@ -92,7 +107,16 @@ object DocumentQuadDetector {
     }
 
     val quad = detectFromYuvGrid(yArr, uArr, vArr, gridW, gridH)
-    return quad to (uprightW to uprightH)
+    val meanLuma = sumY.toFloat() / max(1, yArr.size).toFloat()
+    val edgeClipped = quad != null && quad.points().any {
+      it.x <= 0.02f || it.x >= 0.98f || it.y <= 0.03f || it.y >= 0.95f
+    }
+    return FrameDiagnostics(
+      quad = quad,
+      uprightDims = uprightW to uprightH,
+      meanLuma = meanLuma,
+      edgeClipped = edgeClipped,
+    )
   }
 
   fun detectFromBitmap(bitmap: Bitmap, targetMaxSide: Int = 320): NormalizedQuad? {

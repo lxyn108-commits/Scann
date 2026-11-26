@@ -109,7 +109,7 @@ class ImageProcessor {
 
     val lums = computeLuminanceArray(base, width, height)
     val (paperWhite, inkFloor) = estimatePaperAndInkLevels(lums)
-    val whiteCut = (paperWhite - 22f).coerceIn(194f, 232f)
+    val whiteCut = (paperWhite - 25f).coerceIn(192f, 226f)
     val colorBlackFloor = inkFloor.toFloat().coerceIn(22f, 58f)
     val textBlackFloor = max(colorBlackFloor + 20f, 68f).coerceIn(58f, whiteCut - 72f)
     val textSpan = max(56f, whiteCut - textBlackFloor)
@@ -126,9 +126,9 @@ class ImageProcessor {
       val minC = min(r, min(g, b))
       val chroma = maxC - minC
 
-      // After illumination normalization, true paper, fold remnants, & faint security watermarks
-      // sit near whiteCut with low-to-moderate chroma, while thin text (<200) and stamps/logos (high chroma) stay intact.
-      val lumWeight = smoothstep(whiteCut - 14f, whiteCut + 6f, lum)
+      // After illumination normalization, true paper, fold remnants, & faint paper grain
+      // sit near whiteCut with low-to-moderate chroma, while thin text (<=178) & stamps/logos stay intact.
+      val lumWeight = smoothstep(whiteCut - 18f, whiteCut + 4f, lum)
       val lowChromaWeight = 1f - smoothstep(26f, 54f, chroma)
       val bleachAlpha = (lumWeight * lowChromaWeight).coerceIn(0f, 1f)
 
@@ -191,13 +191,13 @@ class ImageProcessor {
 
     val lums = computeLuminanceArray(base, width, height)
     val (paperWhite, inkFloor) = estimatePaperAndInkLevels(lums)
-    val whiteCut = (paperWhite - 20f).coerceIn(194f, 234f)
+    val whiteCut = (paperWhite - 23f).coerceIn(192f, 228f)
     val textBlackFloor = max(inkFloor.toFloat() + 18f, 64f).coerceIn(54f, whiteCut - 72f)
     val span = max(56f, whiteCut - textBlackFloor)
 
     for (i in 0 until width * height) {
       val lum = lums[i].toFloat()
-      val bleachAlpha = smoothstep(whiteCut - 12f, whiteCut + 6f, lum)
+      val bleachAlpha = smoothstep(whiteCut - 16f, whiteCut + 4f, lum)
       val tn = ((lum - textBlackFloor) / span).coerceIn(0f, 1f)
       val curved = tn.pow(1.42f) * 255f
       val outLum = (curved * (1f - bleachAlpha) + 255f * bleachAlpha)
@@ -469,6 +469,10 @@ class ImageProcessor {
     return p78 to p04
   }
 
+  /**
+   * Noise-gated, overshoot-clamped luminance unsharp mask: sharpens crisp ink & logo strokes
+   * while ignoring flat paper texture and preventing white/dark ringing halos.
+   */
   private fun applyUnsharpMask(
     pixels: IntArray,
     width: Int,
@@ -488,18 +492,32 @@ class ImageProcessor {
         val g = (c ushr 8) and 0xFF
         val b = c and 0xFF
 
+        val lumC = (r * 77 + g * 150 + b * 29) ushr 8
         val n1 = pixels[ym1 + x]
         val n2 = pixels[yp1 + x]
         val n3 = pixels[y0 + x - 1]
         val n4 = pixels[y0 + x + 1]
 
-        val avgR = (((n1 ushr 16) and 0xFF) + ((n2 ushr 16) and 0xFF) + ((n3 ushr 16) and 0xFF) + ((n4 ushr 16) and 0xFF) + r) / 5f
-        val avgG = (((n1 ushr 8) and 0xFF) + ((n2 ushr 8) and 0xFF) + ((n3 ushr 8) and 0xFF) + ((n4 ushr 8) and 0xFF) + g) / 5f
-        val avgB = ((n1 and 0xFF) + (n2 and 0xFF) + (n3 and 0xFF) + (n4 and 0xFF) + b) / 5f
+        fun luma(px: Int) = (((px ushr 16) and 0xFF) * 77 + ((px ushr 8) and 0xFF) * 150 + (px and 0xFF) * 29) ushr 8
+        val l1 = luma(n1)
+        val l2 = luma(n2)
+        val l3 = luma(n3)
+        val l4 = luma(n4)
+        val avgLum = (l1 + l2 + l3 + l4 + lumC) / 5f
+        val detail = lumC - avgLum
 
-        val nr = (r + (r - avgR) * strength).roundToInt().coerceIn(0, 255)
-        val gi = (g + (g - avgG) * strength).roundToInt().coerceIn(0, 255)
-        val bi = (b + (b - avgB) * strength).roundToInt().coerceIn(0, 255)
+        // Coring: ignore subtle paper/JPEG noise so background stays spotless
+        if (kotlin.math.abs(detail) < 9f) continue
+
+        val minN = min(min(l1, l2), min(l3, l4))
+        val maxN = max(max(l1, l2), max(l3, l4))
+        // Clamp overshoot tightly to neighbor extrema to suppress ringing halos around logos/text
+        val targetLum = (lumC + detail * strength).coerceIn(max(0f, minN - 5f), min(255f, maxN + 5f))
+        val deltaLum = targetLum - lumC
+
+        val nr = (r + deltaLum).roundToInt().coerceIn(0, 255)
+        val gi = (g + deltaLum).roundToInt().coerceIn(0, 255)
+        val bi = (b + deltaLum).roundToInt().coerceIn(0, 255)
         out[y0 + x] = (0xFF shl 24) or (nr shl 16) or (gi shl 8) or bi
       }
     }
