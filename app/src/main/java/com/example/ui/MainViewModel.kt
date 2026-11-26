@@ -352,16 +352,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
           com.example.processing.DocumentQuadDetector.detectFromBitmap(bmp, 320).also { bmp.recycle() }
         }.getOrNull()
       }
-      val updated = if (redetected != null && redetected.isConvexValid(minArea = 0.04f)) {
+      val hasMeaningfulQuadChange = redetected != null &&
+        redetected.isConvexValid(minArea = 0.04f) &&
+        quadDiff(redetected, target.quad) > 0.015f
+
+      val updated = if (hasMeaningfulQuadChange) {
         runCatching { repository.reprocessPage(target, quad = redetected) }
           .getOrElse { target.copy(isProcessing = false) }
       } else {
-        target.copy(isProcessing = false)
+        val trim = runCatching {
+          DocumentImageProcessor.analyzePageQualityAndBorders(target.originalImagePath).suggestedTrimRect
+        }.getOrNull()
+        if (trim != null && !trim.isFullImage) {
+          runCatching { repository.reprocessPage(target, cropRect = trim) }
+            .getOrElse { target.copy(isProcessing = false) }
+        } else {
+          target.copy(isProcessing = false)
+        }
       }
       replacePageById(updated)
       refreshSuggestionsForPage(updated)
     }
   }
+
+  private fun quadDiff(a: NormalizedQuad, b: NormalizedQuad): Float =
+    maxOf(
+      kotlin.math.hypot(a.topLeft.x - b.topLeft.x, a.topLeft.y - b.topLeft.y),
+      kotlin.math.hypot(a.topRight.x - b.topRight.x, a.topRight.y - b.topRight.y),
+      kotlin.math.hypot(a.bottomRight.x - b.bottomRight.x, a.bottomRight.y - b.bottomRight.y),
+      kotlin.math.hypot(a.bottomLeft.x - b.bottomLeft.x, a.bottomLeft.y - b.bottomLeft.y),
+    )
 
   fun applyFilterToSelectedPage(filter: EnhancementFilter) {
     val state = _batchState.value

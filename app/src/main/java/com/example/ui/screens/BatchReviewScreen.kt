@@ -61,6 +61,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SuggestionChip
+import androidx.compose.material3.SuggestionChipDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -575,6 +576,11 @@ fun BatchReviewScreen(
                   label = {
                     Text(candidate, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Color.White)
                   },
+                  colors = SuggestionChipDefaults.suggestionChipColors(
+                    containerColor = Color.White.copy(alpha = 0.12f),
+                    labelColor = Color.White,
+                  ),
+                  border = BorderStroke(1.dp, Color.White.copy(alpha = 0.24f)),
                   modifier = Modifier.testTag("title_suggestion_$idx"),
                 )
               }
@@ -621,6 +627,7 @@ fun BatchReviewScreen(
                     searchQuery = "",
                     contentDescription = "Halaman pindaian ${pageIdx + 1}",
                     modifier = Modifier.fillMaxSize(),
+                    zoomable = true,
                   )
                 }
               }
@@ -702,7 +709,7 @@ fun BatchReviewScreen(
             }
           }
 
-          if (currentPage?.isProcessing == true) {
+          if (currentPage?.isProcessing == true || state.isImportingOrCapturing || state.isSavingPdf) {
             Surface(
               shape = RoundedCornerShape(16.dp),
               color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
@@ -713,7 +720,10 @@ fun BatchReviewScreen(
               ) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.5.dp)
                 Spacer(Modifier.width(10.dp))
-                Text("Meningkatkan kejelasan & OCR…", style = MaterialTheme.typography.labelLarge)
+                Text(
+                  text = state.processingMessage ?: "Meningkatkan kejelasan & OCR…",
+                  style = MaterialTheme.typography.labelLarge,
+                )
               }
             }
           }
@@ -730,7 +740,9 @@ fun BatchReviewScreen(
             IconButton(
               onClick = { onMovePage(state.selectedPageIndex, -1) },
               enabled = state.selectedPageIndex > 0,
-              modifier = Modifier.size(36.dp),
+              modifier = Modifier
+                .size(36.dp)
+                .testTag("move_page_left_button"),
             ) {
               Icon(
                 Icons.AutoMirrored.Filled.KeyboardArrowLeft,
@@ -775,7 +787,9 @@ fun BatchReviewScreen(
             IconButton(
               onClick = { onMovePage(state.selectedPageIndex, 1) },
               enabled = state.selectedPageIndex < pages.lastIndex,
-              modifier = Modifier.size(36.dp),
+              modifier = Modifier
+                .size(36.dp)
+                .testTag("move_page_right_button"),
             ) {
               Icon(
                 Icons.AutoMirrored.Filled.KeyboardArrowRight,

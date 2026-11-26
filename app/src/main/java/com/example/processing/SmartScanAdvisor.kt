@@ -79,7 +79,7 @@ object SmartScanAdvisor {
   private val urlRegex = Regex("https?://[^\\s)]+|www\\.[^\\s)]+")
   private val phoneRegex = Regex("(?:\\+?\\d{1,3}[\\s.-]?)?(?:\\(\\d{2,5}\\)|0\\d{2,4}|\\d{3,4})[\\s.-]?\\d{3,4}(?:[\\s.-]?\\d{3,5})?")
   private val dateLikeRegex = Regex("^\\d{4}[-/.]\\d{2}[-/.]\\d{2}$|^\\d{2}[-/.]\\d{2}[-/.]\\d{4}$")
-  private val currencyRegex = Regex("(?:USD|EUR|IDR|Rp|\\$|€)\\s?[0-9][0-9.,]+")
+  private val currencyRegex = Regex("(?:USD|EUR|IDR|Rp\\.?|\\$|€)\\s?[0-9][0-9.,]+")
   private val maskedOrNoiseChars = setOf('*', '|', '~', '^', '_', '[', ']', '{', '}', '<', '>')
 
   internal fun isCleanTitleCandidate(raw: String): Boolean {
@@ -132,12 +132,16 @@ object SmartScanAdvisor {
     val lower = combinedText.lowercase(Locale.ROOT)
     when {
       "invoice" in lower || "faktur" in lower -> candidates.add("Invoice • $dateStamp")
-      "receipt" in lower || "struk" in lower || "total" in lower || "pembelian" in lower ->
+      "kwitansi" in lower -> candidates.add("Kwitansi • $dateStamp")
+      "receipt" in lower || "struk" in lower || "nota" in lower || "total" in lower || "pembelian" in lower ->
         candidates.add("Struk • $dateStamp")
-      "contract" in lower || "agreement" in lower || "perjanjian" in lower ->
+      "resi" in lower || "pengiriman" in lower -> candidates.add("Resi • $dateStamp")
+      "npwp" in lower || "pajak" in lower || "tax" in lower -> candidates.add("Pajak • $dateStamp")
+      "contract" in lower || "agreement" in lower || "perjanjian" in lower || "kontrak" in lower ->
         candidates.add("Kontrak • $dateStamp")
       "certificate" in lower || "sertifikat" in lower -> candidates.add("Sertifikat • $dateStamp")
       "resume" in lower || "curriculum vitae" in lower -> candidates.add("CV • $dateStamp")
+      "surat" in lower -> candidates.add("Surat • $dateStamp")
     }
 
     candidates.add("Scan $dateStamp (${pages.size} hal)")
@@ -313,8 +317,9 @@ object SmartScanAdvisor {
   fun suggestLibrarySearchTags(ocrTexts: List<String>): List<String> {
     if (ocrTexts.isEmpty()) return emptyList()
     val knownCategories = listOf(
-      "Invoice", "Receipt", "Faktur", "Struk", "Contract", "Report",
-      "Certificate", "Agreement", "Statement", "Tax", "Order", "Resume",
+      "Invoice", "Receipt", "Faktur", "Struk", "Kwitansi", "Nota",
+      "Resi", "Pajak", "Sertifikat", "Kontrak", "Contract", "Report",
+      "Certificate", "Agreement", "Tax", "KTP", "NPWP", "Surat",
     )
     val joined = ocrTexts.joinToString("\n")
     val matchedCategories = knownCategories.filter { cat ->
@@ -327,6 +332,8 @@ object SmartScanAdvisor {
         "the", "and", "for", "with", "that", "this", "from", "your", "have",
         "page", "date", "total", "document", "clearscan", "yang", "dan", "untuk",
         "dengan", "dari", "atau", "sudah", "dapat", "harga", "jumlah", "telp",
+        "halaman", "nomor", "tanggal", "alamat", "nama", "kasir", "kembali",
+        "kembalian", "tunai", "diskon", "promo", "barang", "sales",
       )
       Regex("\\b[A-Za-z]{4,14}\\b").findAll(joined).forEach { m ->
         val word = m.value

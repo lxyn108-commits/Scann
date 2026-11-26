@@ -274,14 +274,14 @@ class ScanRepository(
 
     val combinedOcr = finalizedPages
       .mapIndexed { i, p ->
-        if (finalizedPages.size > 1) "--- Page ${i + 1} ---\n${p.ocrText}" else p.ocrText
+        if (finalizedPages.size > 1) "--- Halaman ${i + 1} ---\n${p.ocrText}" else p.ocrText
       }
       .joinToString("\n\n")
       .trim()
 
     val docEntity = ScannedDocumentEntity(
       id = docId,
-      title = title.trim().ifBlank { "Scanned Document" },
+      title = title.trim().ifBlank { "Dokumen Pindaian" },
       createdAt = createdAt,
       updatedAt = now,
       pageCount = finalizedPages.size,

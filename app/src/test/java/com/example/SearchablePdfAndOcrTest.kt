@@ -932,4 +932,37 @@ class SearchablePdfAndOcrTest {
     val b = borderPaper and 0xFF
     assertTrue("Paper immediately adjacent to dark stroke must stay clean white (RGB=$r,$g,$b)", r >= 245 && g >= 245 && b >= 245)
   }
+
+  @Test
+  fun smartScanAdvisorSupportsIndonesianCategoriesAndRpDotCurrency() {
+    val kwitansiDraft = DraftPage(
+      id = "p_kwitansi",
+      originalImagePath = "",
+      enhancedImagePath = "",
+      filter = EnhancementFilter.MAGIC_COLOR,
+      ocrResult = OcrPageResult(
+        formattedText = "KWITANSI PEMBAYARAN\nPT Karya Mandiri\nJumlah Rp. 1.250.000",
+        lines = listOf(
+          OcrLineBox("KWITANSI PEMBAYARAN", 0.1f, 0.1f, 0.8f, 0.15f, emptyList()),
+          OcrLineBox("PT Karya Mandiri", 0.1f, 0.18f, 0.7f, 0.23f, emptyList()),
+        ),
+        imageWidth = 1000,
+        imageHeight = 1400,
+      ),
+    )
+
+    val titles = SmartScanAdvisor.suggestTitles(listOf(kwitansiDraft))
+    assertTrue("Should suggest Kwitansi category title: $titles", titles.any { it.startsWith("Kwitansi") })
+
+    val actions = SmartScanAdvisor.extractDocumentActions(kwitansiDraft.ocrResult!!.formattedText)
+    assertTrue(
+      "Should extract Rp. 1.250.000 with dot notation: $actions",
+      actions.any { it.type == DocumentActionType.AMOUNT && it.value.contains("1.250.000") },
+    )
+
+    val tags = SmartScanAdvisor.suggestLibrarySearchTags(listOf("Kwitansi Pajak Resi"))
+    assertTrue(tags.contains("Kwitansi"))
+    assertTrue(tags.contains("Pajak"))
+    assertTrue(tags.contains("Resi"))
+  }
 }

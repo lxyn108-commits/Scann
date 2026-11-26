@@ -470,6 +470,7 @@ fun DocumentViewerScreen(
                 searchQuery = trimmedQuery,
                 contentDescription = "${doc.title} halaman ${pageIdx + 1}",
                 modifier = Modifier.fillMaxSize(),
+                zoomable = true,
               )
             }
 
@@ -509,7 +510,31 @@ fun DocumentViewerScreen(
                 text = "Teks OCR Sesuai Tata Letak",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
               )
+              if (doc.fullOcrText.isNotBlank()) {
+                IconButton(
+                  onClick = {
+                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                      type = "text/plain"
+                      putExtra(Intent.EXTRA_SUBJECT, doc.title)
+                      putExtra(Intent.EXTRA_TEXT, doc.fullOcrText)
+                    }
+                    runCatching {
+                      context.startActivity(Intent.createChooser(shareIntent, "Bagikan Teks OCR"))
+                    }.onFailure {
+                      onCopyText(doc.title, doc.fullOcrText)
+                    }
+                  },
+                  modifier = Modifier.testTag("share_ocr_text_button"),
+                ) {
+                  Icon(
+                    Icons.Filled.Share,
+                    contentDescription = "Bagikan teks OCR",
+                    modifier = Modifier.size(18.dp),
+                  )
+                }
+              }
               TextButton(
                 onClick = { onCopyText(doc.title, doc.fullOcrText) },
                 modifier = Modifier.testTag("copy_ocr_text_button"),

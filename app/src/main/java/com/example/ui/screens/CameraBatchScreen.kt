@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -199,6 +200,7 @@ private fun CameraViewfinderContent(
   val scope = rememberCoroutineScope()
 
   var isTorchOn by remember { mutableStateOf(false) }
+  var isZoom2x by remember { mutableStateOf(false) }
   var showGrid by remember { mutableStateOf(false) }
   var autoCaptureEnabled by remember { mutableStateOf(true) }
   var liveOcrLines by remember { mutableIntStateOf(0) }
@@ -422,7 +424,7 @@ private fun CameraViewfinderContent(
         ) {
           Icon(
             imageVector = if (showGrid) Icons.Filled.GridOn else Icons.Filled.GridOff,
-            contentDescription = "Toggle grid",
+            contentDescription = "Tampilkan garis bantu",
             tint = Color.White,
           )
         }
@@ -513,7 +515,39 @@ private fun CameraViewfinderContent(
       }
     }
 
-    // Bottom Floating "Pindai dokumen >" Pill + Presets + Shutter Deck
+    AnimatedVisibility(
+      visible = isProcessingCapture,
+      enter = fadeIn(),
+      exit = fadeOut(),
+      modifier = Modifier
+        .align(Alignment.Center)
+        .testTag("camera_processing_pill"),
+    ) {
+      Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = Color.Black.copy(alpha = 0.72f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
+      ) {
+        Row(
+          modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          CircularProgressIndicator(
+            modifier = Modifier.size(18.dp),
+            strokeWidth = 2.5.dp,
+            color = Color.White,
+          )
+          Text(
+            text = "Meluruskan & memindai OCR…",
+            style = MaterialTheme.typography.labelLarge,
+            color = Color.White,
+          )
+        }
+      }
+    }
+
+    // Bottom Floating Zoom + "Pindai dokumen >" Pill + Presets + Shutter Deck
     Column(
       modifier = Modifier
         .align(Alignment.BottomCenter)
@@ -522,6 +556,26 @@ private fun CameraViewfinderContent(
         .padding(bottom = 16.dp),
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+      Surface(
+        shape = RoundedCornerShape(50),
+        color = Color.Black.copy(alpha = 0.50f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.26f)),
+        modifier = Modifier
+          .padding(bottom = 10.dp)
+          .clip(RoundedCornerShape(50))
+          .clickable {
+            isZoom2x = !isZoom2x
+            cameraController.setLinearZoom(if (isZoom2x) 0.45f else 0f)
+          }
+          .testTag("camera_zoom_toggle"),
+      ) {
+        Text(
+          text = if (isZoom2x) "2.0x • Dekat" else "1.0x • Normal",
+          style = MaterialTheme.typography.labelMedium,
+          color = Color.White,
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+        )
+      }
       AnimatedVisibility(
         visible = activeQuad != null || batchPages.isNotEmpty() || isRetakingPage,
         enter = fadeIn(),

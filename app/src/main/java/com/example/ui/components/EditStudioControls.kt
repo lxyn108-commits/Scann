@@ -291,7 +291,10 @@ fun CircularFilterSelectorRow(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.End,
       ) {
-        TextButton(onClick = { onApplyFilterToAll(currentPage.filter) }) {
+        TextButton(
+          onClick = { onApplyFilterToAll(currentPage.filter) },
+          modifier = Modifier.testTag("apply_filter_all_button"),
+        ) {
           Icon(
             imageVector = Icons.Filled.AutoAwesome,
             contentDescription = null,

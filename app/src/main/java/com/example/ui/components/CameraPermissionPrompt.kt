@@ -60,7 +60,7 @@ fun CameraPermissionPrompt(
         .clip(CircleShape)
         .background(Color.White.copy(alpha = 0.12f)),
     ) {
-      Icon(Icons.Filled.Close, contentDescription = "Close", tint = Color.White)
+      Icon(Icons.Filled.Close, contentDescription = "Tutup kamera", tint = Color.White)
     }
 
     Card(

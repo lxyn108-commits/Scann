@@ -47,6 +47,10 @@ private enum class QuadHandle {
   TOP_RIGHT,
   BOTTOM_RIGHT,
   BOTTOM_LEFT,
+  TOP_EDGE,
+  RIGHT_EDGE,
+  BOTTOM_EDGE,
+  LEFT_EDGE,
 }
 
 @Composable
@@ -101,7 +105,7 @@ fun InteractivePerspectiveOverlay(
           .data(File(rawImagePath))
           .memoryCacheKey("raw_${rawImagePath}_${File(rawImagePath).lastModified()}")
           .build(),
-        contentDescription = "Raw document image for perspective straightening",
+        contentDescription = "Gambar asli untuk pelurusan tepi",
         contentScale = ContentScale.FillBounds,
         modifier = Modifier.fillMaxSize(),
       )
@@ -114,19 +118,33 @@ fun InteractivePerspectiveOverlay(
               onDragStart = { offset ->
                 val nx = offset.x / size.width
                 val ny = offset.y / size.height
-                val handles = listOf(
+                fun mid(a: NormalizedPoint, b: NormalizedPoint) = NormalizedPoint((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f)
+                val corners = listOf(
                   QuadHandle.TOP_LEFT to latestQuad.topLeft,
                   QuadHandle.TOP_RIGHT to latestQuad.topRight,
                   QuadHandle.BOTTOM_RIGHT to latestQuad.bottomRight,
                   QuadHandle.BOTTOM_LEFT to latestQuad.bottomLeft,
                 )
-                val nearest = handles.minByOrNull { (_, pt) ->
+                val nearestCorner = corners.minByOrNull { (_, pt) ->
                   hypot(nx - pt.x, ny - pt.y)
                 }
-                activeHandle = if (nearest != null && hypot(nx - nearest.second.x, ny - nearest.second.y) < 0.16f) {
-                  nearest.first
+                if (nearestCorner != null && hypot(nx - nearestCorner.second.x, ny - nearestCorner.second.y) < 0.14f) {
+                  activeHandle = nearestCorner.first
                 } else {
-                  null
+                  val edges = listOf(
+                    QuadHandle.TOP_EDGE to mid(latestQuad.topLeft, latestQuad.topRight),
+                    QuadHandle.RIGHT_EDGE to mid(latestQuad.topRight, latestQuad.bottomRight),
+                    QuadHandle.BOTTOM_EDGE to mid(latestQuad.bottomRight, latestQuad.bottomLeft),
+                    QuadHandle.LEFT_EDGE to mid(latestQuad.bottomLeft, latestQuad.topLeft),
+                  )
+                  val nearestEdge = edges.minByOrNull { (_, pt) ->
+                    hypot(nx - pt.x, ny - pt.y)
+                  }
+                  activeHandle = if (nearestEdge != null && hypot(nx - nearestEdge.second.x, ny - nearestEdge.second.y) < 0.12f) {
+                    nearestEdge.first
+                  } else {
+                    null
+                  }
                 }
               },
               onDragEnd = { activeHandle = null },
@@ -147,6 +165,22 @@ fun InteractivePerspectiveOverlay(
                   QuadHandle.TOP_RIGHT -> latestQuad.copy(topRight = move(latestQuad.topRight))
                   QuadHandle.BOTTOM_RIGHT -> latestQuad.copy(bottomRight = move(latestQuad.bottomRight))
                   QuadHandle.BOTTOM_LEFT -> latestQuad.copy(bottomLeft = move(latestQuad.bottomLeft))
+                  QuadHandle.TOP_EDGE -> latestQuad.copy(
+                    topLeft = move(latestQuad.topLeft),
+                    topRight = move(latestQuad.topRight),
+                  )
+                  QuadHandle.RIGHT_EDGE -> latestQuad.copy(
+                    topRight = move(latestQuad.topRight),
+                    bottomRight = move(latestQuad.bottomRight),
+                  )
+                  QuadHandle.BOTTOM_EDGE -> latestQuad.copy(
+                    bottomRight = move(latestQuad.bottomRight),
+                    bottomLeft = move(latestQuad.bottomLeft),
+                  )
+                  QuadHandle.LEFT_EDGE -> latestQuad.copy(
+                    topLeft = move(latestQuad.topLeft),
+                    bottomLeft = move(latestQuad.bottomLeft),
+                  )
                 }
                 if (candidate.isConvexValid(minArea = 0.04f)) {
                   latestQuad = candidate
@@ -212,15 +246,23 @@ fun InteractivePerspectiveOverlay(
           )
         }
 
-        // Edge midpoints (visual alignment markers)
+        // Draggable Edge Midpoints
         val edgeMids = listOf(
-          Offset((tl.x + tr.x) * 0.5f, (tl.y + tr.y) * 0.5f),
-          Offset((tr.x + br.x) * 0.5f, (tr.y + br.y) * 0.5f),
-          Offset((br.x + bl.x) * 0.5f, (br.y + bl.y) * 0.5f),
-          Offset((bl.x + tl.x) * 0.5f, (bl.y + tl.y) * 0.5f),
+          QuadHandle.TOP_EDGE to Offset((tl.x + tr.x) * 0.5f, (tl.y + tr.y) * 0.5f),
+          QuadHandle.RIGHT_EDGE to Offset((tr.x + br.x) * 0.5f, (tr.y + br.y) * 0.5f),
+          QuadHandle.BOTTOM_EDGE to Offset((br.x + bl.x) * 0.5f, (br.y + bl.y) * 0.5f),
+          QuadHandle.LEFT_EDGE to Offset((bl.x + tl.x) * 0.5f, (bl.y + tl.y) * 0.5f),
         )
-        for (mid in edgeMids) {
-          drawCircle(color = Color.White, radius = 4.dp.toPx(), center = mid)
+        for ((handle, mid) in edgeMids) {
+          val isEdgeSelected = activeHandle == handle
+          val rMid = if (isEdgeSelected) 8.dp.toPx() else 5.5.dp.toPx()
+          drawCircle(color = if (isEdgeSelected) primaryColor else Color.White, radius = rMid, center = mid)
+          drawCircle(
+            color = Color.White,
+            radius = rMid,
+            center = mid,
+            style = Stroke(width = 1.6.dp.toPx()),
+          )
         }
 
         // Draggable Corner Handles
@@ -242,14 +284,19 @@ fun InteractivePerspectiveOverlay(
           )
         }
 
-        // Live 2.6x Corner Precision Magnifier Loupe when dragging
+        // Live 2.6x Precision Magnifier Loupe when dragging any corner or edge
         val dragging = activeHandle
         if (dragging != null && loupeBitmap != null) {
+          fun midNorm(a: NormalizedPoint, b: NormalizedPoint) = NormalizedPoint((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f)
           val targetNorm = when (dragging) {
             QuadHandle.TOP_LEFT -> latestQuad.topLeft
             QuadHandle.TOP_RIGHT -> latestQuad.topRight
             QuadHandle.BOTTOM_RIGHT -> latestQuad.bottomRight
             QuadHandle.BOTTOM_LEFT -> latestQuad.bottomLeft
+            QuadHandle.TOP_EDGE -> midNorm(latestQuad.topLeft, latestQuad.topRight)
+            QuadHandle.RIGHT_EDGE -> midNorm(latestQuad.topRight, latestQuad.bottomRight)
+            QuadHandle.BOTTOM_EDGE -> midNorm(latestQuad.bottomRight, latestQuad.bottomLeft)
+            QuadHandle.LEFT_EDGE -> midNorm(latestQuad.bottomLeft, latestQuad.topLeft)
           }
           val loupeRadius = 46.dp.toPx()
           val loupeMargin = 14.dp.toPx() + loupeRadius

@@ -11,6 +11,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -115,13 +117,20 @@ fun LibraryScreen(
   onDeleteDocument: (String) -> Unit,
 ) {
   var onlyMultiPage by remember { mutableStateOf(false) }
+  var onlyActionable by remember { mutableStateOf(false) }
   var renamingDoc by remember { mutableStateOf<ScannedDocumentEntity?>(null) }
   var renameText by remember { mutableStateOf("") }
 
-  val displayedDocuments = remember(documents, onlyMultiPage) {
-    if (onlyMultiPage) documents.filter { it.pageCount > 1 } else documents
-  }
   val hasMultiPage = remember(documents) { documents.any { it.pageCount > 1 } }
+  val hasActionableDocs = remember(documents) {
+    documents.any { SmartScanAdvisor.extractDocumentActions(it.fullOcrText).isNotEmpty() }
+  }
+  val displayedDocuments = remember(documents, onlyMultiPage, onlyActionable) {
+    documents.filter { doc ->
+      (!onlyMultiPage || doc.pageCount > 1) &&
+        (!onlyActionable || SmartScanAdvisor.extractDocumentActions(doc.fullOcrText).isNotEmpty())
+    }
+  }
   val photoPickerLauncher = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 25),
     onResult = { uris ->
@@ -274,30 +283,43 @@ fun LibraryScreen(
         val searchSuggestions = remember(documents) {
           SmartScanAdvisor.suggestLibrarySearchTags(documents.map { it.fullOcrText })
         }
-        if (searchSuggestions.isNotEmpty() || hasMultiPage) {
+        if (searchSuggestions.isNotEmpty() || hasMultiPage || hasActionableDocs) {
           Spacer(Modifier.height(10.dp))
           LazyRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(horizontal = 2.dp),
           ) {
-            if (hasMultiPage) {
+            if (hasMultiPage || hasActionableDocs) {
               item {
                 FilterChip(
-                  selected = !onlyMultiPage && searchQuery.isBlank(),
+                  selected = !onlyMultiPage && !onlyActionable && searchQuery.isBlank(),
                   onClick = {
                     onlyMultiPage = false
+                    onlyActionable = false
                     onSearchQueryChange("")
                   },
                   label = { Text("Semua") },
                   modifier = Modifier.testTag("library_filter_all"),
                 )
               }
+            }
+            if (hasMultiPage) {
               item {
                 FilterChip(
                   selected = onlyMultiPage,
                   onClick = { onlyMultiPage = !onlyMultiPage },
                   label = { Text("Multi-hal") },
                   modifier = Modifier.testTag("library_filter_multipage"),
+                )
+              }
+            }
+            if (hasActionableDocs) {
+              item {
+                FilterChip(
+                  selected = onlyActionable,
+                  onClick = { onlyActionable = !onlyActionable },
+                  label = { Text("Ada Info") },
+                  modifier = Modifier.testTag("library_filter_actionable"),
                 )
               }
             }
@@ -701,9 +723,10 @@ private fun ScannedDocumentCard(
 
         Spacer(Modifier.height(6.dp))
 
-        Row(
-          verticalAlignment = Alignment.CenterVertically,
+        @OptIn(ExperimentalLayoutApi::class)
+        FlowRow(
           horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
           Surface(
             shape = CircleShape,

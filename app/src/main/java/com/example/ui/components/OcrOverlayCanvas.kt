@@ -1,8 +1,10 @@
 package com.example.ui.components
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,12 +18,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -45,6 +49,7 @@ fun ScannedPagePreview(
   searchQuery: String,
   contentDescription: String,
   modifier: Modifier = Modifier,
+  zoomable: Boolean = false,
 ) {
   val context = LocalContext.current
   val extendedColors = LocalClearScanColors.current
@@ -52,9 +57,12 @@ fun ScannedPagePreview(
   val aspectRatio = remember(imageWidth, imageHeight) {
     if (imageWidth > 0 && imageHeight > 0) imageWidth.toFloat() / imageHeight.toFloat() else 0.75f
   }
+  var isZoomed by remember(imagePath) { mutableStateOf(false) }
+  var panOffset by remember(imagePath) { mutableStateOf(Offset.Zero) }
+  val animatedScale by animateFloatAsState(targetValue = if (isZoomed) 2.2f else 1f, label = "pageZoom")
 
   BoxWithConstraints(
-    modifier = modifier,
+    modifier = modifier.clipToBounds(),
     contentAlignment = Alignment.Center,
   ) {
     val maxW = constraints.maxWidth.toFloat().coerceAtLeast(1f)
@@ -74,10 +82,36 @@ fun ScannedPagePreview(
         .padding(4.dp)
         .background(MaterialTheme.colorScheme.surface)
         .then(
-          Modifier
-            .let { mod ->
-              mod
-            }
+          if (zoomable) {
+            Modifier
+              .pointerInput(imagePath) {
+                detectTapGestures(
+                  onDoubleTap = {
+                    isZoomed = !isZoomed
+                    if (!isZoomed) panOffset = Offset.Zero
+                  }
+                )
+              }
+              .then(
+                if (isZoomed) {
+                  Modifier.pointerInput(imagePath, fitW, fitH) {
+                    detectDragGestures { change, dragAmount ->
+                      change.consume()
+                      val maxPanX = (fitW * 1.2f) * 0.5f
+                      val maxPanY = (fitH * 1.2f) * 0.5f
+                      panOffset = Offset(
+                        x = (panOffset.x + dragAmount.x).coerceIn(-maxPanX, maxPanX),
+                        y = (panOffset.y + dragAmount.y).coerceIn(-maxPanY, maxPanY),
+                      )
+                    }
+                  }
+                } else {
+                  Modifier
+                }
+              )
+          } else {
+            Modifier
+          }
         ),
       contentAlignment = Alignment.Center,
     ) {
@@ -85,6 +119,12 @@ fun ScannedPagePreview(
         modifier = Modifier
           .align(Alignment.Center)
           .size(fitWDp, fitHDp)
+          .graphicsLayer {
+            scaleX = animatedScale
+            scaleY = animatedScale
+            translationX = if (isZoomed) panOffset.x else 0f
+            translationY = if (isZoomed) panOffset.y else 0f
+          }
       ) {
         AsyncImage(
           model = ImageRequest.Builder(context)
@@ -220,7 +260,7 @@ fun InteractiveCropPreview(
           .data(File(imagePath))
           .memoryCacheKey("${imagePath}_${File(imagePath).lastModified()}")
           .build(),
-        contentDescription = "Page to crop",
+        contentDescription = "Halaman yang akan dipotong",
         contentScale = ContentScale.FillBounds,
         modifier = Modifier.fillMaxSize(),
       )
