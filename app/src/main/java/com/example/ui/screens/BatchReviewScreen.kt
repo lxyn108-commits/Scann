@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.AddAPhoto
+import androidx.compose.material.icons.filled.AttachMoney
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
@@ -41,6 +42,9 @@ import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DocumentScanner
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -529,6 +533,18 @@ fun BatchReviewScreen(
                     DocumentActionType.AMOUNT -> onCopyText("Nominal", action.value)
                   }
                 },
+                leadingIcon = {
+                  Icon(
+                    imageVector = when (action.type) {
+                      DocumentActionType.EMAIL -> Icons.Filled.Email
+                      DocumentActionType.URL -> Icons.Filled.Language
+                      DocumentActionType.PHONE -> Icons.Filled.Phone
+                      DocumentActionType.AMOUNT -> Icons.Filled.AttachMoney
+                    },
+                    contentDescription = null,
+                    modifier = Modifier.size(15.dp),
+                  )
+                },
                 label = {
                   Text(
                     text = action.displayLabel,
@@ -539,6 +555,7 @@ fun BatchReviewScreen(
                 colors = AssistChipDefaults.assistChipColors(
                   containerColor = Color.White.copy(alpha = 0.08f),
                   labelColor = Color.White,
+                  leadingIconContentColor = MaterialTheme.colorScheme.secondary,
                 ),
                 modifier = Modifier.testTag("batch_smart_action_$idx"),
               )

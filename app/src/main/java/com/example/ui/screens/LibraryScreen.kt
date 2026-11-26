@@ -35,16 +35,23 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddAPhoto
+import androidx.compose.material.icons.filled.AttachMoney
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DocumentScanner
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -65,6 +72,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -85,6 +93,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.R
 import com.example.data.local.ScannedDocumentEntity
+import com.example.processing.DocumentActionType
 import com.example.processing.SmartScanAdvisor
 import com.example.ui.theme.LocalClearScanColors
 import java.io.File
@@ -100,9 +109,19 @@ fun LibraryScreen(
   onStartBatchScan: () -> Unit,
   onImportPhotos: (List<android.net.Uri>) -> Unit,
   onOpenDocument: (String) -> Unit,
+  onEditDocument: (String) -> Unit,
+  onRenameDocument: (String, String) -> Unit,
   onSharePdf: (ScannedDocumentEntity) -> Unit,
   onDeleteDocument: (String) -> Unit,
 ) {
+  var onlyMultiPage by remember { mutableStateOf(false) }
+  var renamingDoc by remember { mutableStateOf<ScannedDocumentEntity?>(null) }
+  var renameText by remember { mutableStateOf("") }
+
+  val displayedDocuments = remember(documents, onlyMultiPage) {
+    if (onlyMultiPage) documents.filter { it.pageCount > 1 } else documents
+  }
+  val hasMultiPage = remember(documents) { documents.any { it.pageCount > 1 } }
   val photoPickerLauncher = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = 25),
     onResult = { uris ->
@@ -205,7 +224,7 @@ fun LibraryScreen(
               )
               Spacer(Modifier.width(6.dp))
               Text(
-                text = "${documents.size} PDF${if (documents.size == 1) "" else "s"}",
+                text = "${documents.size} PDF",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
               )
@@ -230,7 +249,7 @@ fun LibraryScreen(
             )
           },
           leadingIcon = {
-            Icon(Icons.Filled.Search, contentDescription = "Search documents")
+            Icon(Icons.Filled.Search, contentDescription = "Cari dokumen")
           },
           trailingIcon = {
             if (searchQuery.isNotEmpty()) {
@@ -238,7 +257,7 @@ fun LibraryScreen(
                 onClick = { onSearchQueryChange("") },
                 modifier = Modifier.testTag("clear_search_button"),
               ) {
-                Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                Icon(Icons.Filled.Close, contentDescription = "Hapus pencarian")
               }
             }
           },
@@ -255,12 +274,33 @@ fun LibraryScreen(
         val searchSuggestions = remember(documents) {
           SmartScanAdvisor.suggestLibrarySearchTags(documents.map { it.fullOcrText })
         }
-        if (searchSuggestions.isNotEmpty()) {
+        if (searchSuggestions.isNotEmpty() || hasMultiPage) {
           Spacer(Modifier.height(10.dp))
           LazyRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(horizontal = 2.dp),
           ) {
+            if (hasMultiPage) {
+              item {
+                FilterChip(
+                  selected = !onlyMultiPage && searchQuery.isBlank(),
+                  onClick = {
+                    onlyMultiPage = false
+                    onSearchQueryChange("")
+                  },
+                  label = { Text("Semua") },
+                  modifier = Modifier.testTag("library_filter_all"),
+                )
+              }
+              item {
+                FilterChip(
+                  selected = onlyMultiPage,
+                  onClick = { onlyMultiPage = !onlyMultiPage },
+                  label = { Text("Multi-hal") },
+                  modifier = Modifier.testTag("library_filter_multipage"),
+                )
+              }
+            }
             itemsIndexed(searchSuggestions) { idx, tag ->
               val selected = searchQuery.equals(tag, ignoreCase = true)
               FilterChip(
@@ -294,7 +334,7 @@ fun LibraryScreen(
               .weight(1f)
               .fillMaxWidth(),
           )
-        } else if (documents.isEmpty()) {
+        } else if (displayedDocuments.isEmpty()) {
           Box(
             modifier = Modifier
               .weight(1f)
@@ -310,12 +350,12 @@ fun LibraryScreen(
               )
               Spacer(Modifier.height(12.dp))
               Text(
-                text = "No matching text or title found",
+                text = "Judul atau teks tidak ditemukan",
                 style = MaterialTheme.typography.titleMedium,
               )
               Spacer(Modifier.height(4.dp))
               Text(
-                text = "Try searching another word detected inside your scanned PDFs.",
+                text = "Coba kata kunci lain atau nonaktifkan filter yang aktif.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
               )
@@ -331,11 +371,16 @@ fun LibraryScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
           ) {
-            items(documents, key = { it.id }) { doc ->
+            items(displayedDocuments, key = { it.id }) { doc ->
               ScannedDocumentCard(
                 doc = doc,
                 searchQuery = searchQuery,
                 onClick = { onOpenDocument(doc.id) },
+                onEdit = { onEditDocument(doc.id) },
+                onRename = {
+                  renamingDoc = doc
+                  renameText = doc.title
+                },
                 onSharePdf = { onSharePdf(doc) },
                 onDelete = { onDeleteDocument(doc.id) },
               )
@@ -357,13 +402,51 @@ fun LibraryScreen(
             CircularProgressIndicator()
             Spacer(Modifier.height(16.dp))
             Text(
-              text = "Enhancing pages & extracting OCR text…",
+              text = "Mempertajam halaman & memindai teks OCR…",
               style = MaterialTheme.typography.titleMedium,
             )
           }
         }
       }
     }
+  }
+
+  renamingDoc?.let { targetDoc ->
+    AlertDialog(
+      onDismissRequest = { renamingDoc = null },
+      title = { Text("Ubah Judul Dokumen") },
+      text = {
+        OutlinedTextField(
+          value = renameText,
+          onValueChange = { renameText = it },
+          singleLine = true,
+          label = { Text("Judul dokumen") },
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("library_rename_input"),
+        )
+      },
+      confirmButton = {
+        TextButton(
+          onClick = {
+            val clean = renameText.trim()
+            if (clean.isNotEmpty()) {
+              onRenameDocument(targetDoc.id, clean)
+            }
+            renamingDoc = null
+          },
+          enabled = renameText.isNotBlank(),
+          modifier = Modifier.testTag("library_rename_confirm"),
+        ) {
+          Text("Simpan")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { renamingDoc = null }) {
+          Text("Batal")
+        }
+      },
+    )
   }
 }
 
@@ -392,7 +475,7 @@ private fun EmptyLibraryState(
     ) {
       Image(
         painter = painterResource(id = R.drawable.img_scanner_hero),
-        contentDescription = "Document scanning and OCR illustration",
+        contentDescription = "Ilustrasi pemindaian dokumen dan OCR",
         contentScale = ContentScale.Crop,
         modifier = Modifier
           .fillMaxWidth()
@@ -468,6 +551,8 @@ private fun ScannedDocumentCard(
   doc: ScannedDocumentEntity,
   searchQuery: String,
   onClick: () -> Unit,
+  onEdit: () -> Unit,
+  onRename: () -> Unit,
   onSharePdf: () -> Unit,
   onDelete: () -> Unit,
 ) {
@@ -478,8 +563,12 @@ private fun ScannedDocumentCard(
   val snippet = remember(doc.fullOcrText, searchQuery) {
     buildSnippet(doc.fullOcrText, searchQuery)
   }
+  val highlightAction = remember(doc.fullOcrText) {
+    val actions = SmartScanAdvisor.extractDocumentActions(doc.fullOcrText)
+    actions.firstOrNull { it.type == DocumentActionType.AMOUNT } ?: actions.firstOrNull()
+  }
   val dateText = remember(doc.updatedAt) {
-    DateFormat.format("MMM d, yyyy • HH:mm", Date(doc.updatedAt)).toString()
+    DateFormat.format("d MMM yyyy • HH:mm", Date(doc.updatedAt)).toString()
   }
 
   Card(
@@ -512,7 +601,7 @@ private fun ScannedDocumentCard(
             .data(File(doc.thumbnailPath))
             .crossfade(true)
             .build(),
-          contentDescription = "${doc.title} thumbnail",
+          contentDescription = "Pratinjau ${doc.title}",
           contentScale = ContentScale.Crop,
           modifier = Modifier.fillMaxSize(),
         )
@@ -524,7 +613,7 @@ private fun ScannedDocumentCard(
           color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
         ) {
           Text(
-            text = "${doc.pageCount}p",
+            text = "${doc.pageCount} hal",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.surface,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
@@ -556,14 +645,30 @@ private fun ScannedDocumentCard(
                 .size(48.dp)
                 .testTag("doc_menu_${doc.id}"),
             ) {
-              Icon(Icons.Filled.MoreVert, contentDescription = "Document actions")
+              Icon(Icons.Filled.MoreVert, contentDescription = "Opsi dokumen")
             }
             DropdownMenu(
               expanded = menuExpanded,
               onDismissRequest = { menuExpanded = false },
             ) {
               DropdownMenuItem(
-                text = { Text("Share Searchable PDF") },
+                text = { Text("Edit Halaman") },
+                leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+                onClick = {
+                  menuExpanded = false
+                  onEdit()
+                },
+              )
+              DropdownMenuItem(
+                text = { Text("Ubah Judul") },
+                leadingIcon = { Icon(Icons.Filled.DriveFileRenameOutline, contentDescription = null) },
+                onClick = {
+                  menuExpanded = false
+                  onRename()
+                },
+              )
+              DropdownMenuItem(
+                text = { Text("Bagikan PDF Searchable") },
                 leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },
                 onClick = {
                   menuExpanded = false
@@ -571,7 +676,7 @@ private fun ScannedDocumentCard(
                 },
               )
               DropdownMenuItem(
-                text = { Text("Delete Document") },
+                text = { Text("Hapus Dokumen") },
                 leadingIcon = {
                   Icon(
                     Icons.Filled.DeleteOutline,
@@ -616,10 +721,42 @@ private fun ScannedDocumentCard(
               )
               Spacer(Modifier.width(4.dp))
               Text(
-                text = if (doc.fullOcrText.isNotBlank()) "Searchable PDF" else "Scanned PDF",
+                text = if (doc.fullOcrText.isNotBlank()) "PDF Searchable" else "PDF Pindaian",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
               )
+            }
+          }
+
+          if (highlightAction != null) {
+            Surface(
+              shape = CircleShape,
+              color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+            ) {
+              Row(
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+              ) {
+                Icon(
+                  imageVector = when (highlightAction.type) {
+                    DocumentActionType.EMAIL -> Icons.Filled.Email
+                    DocumentActionType.URL -> Icons.Filled.Language
+                    DocumentActionType.PHONE -> Icons.Filled.Phone
+                    DocumentActionType.AMOUNT -> Icons.Filled.AttachMoney
+                  },
+                  contentDescription = null,
+                  tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                  modifier = Modifier.size(12.dp),
+                )
+                Spacer(Modifier.width(3.dp))
+                Text(
+                  text = highlightAction.displayLabel,
+                  style = MaterialTheme.typography.labelSmall,
+                  color = MaterialTheme.colorScheme.onPrimaryContainer,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
             }
           }
         }

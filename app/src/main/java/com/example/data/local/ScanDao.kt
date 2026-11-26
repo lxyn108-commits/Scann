@@ -39,6 +39,9 @@ interface ScanDao {
   @Query("DELETE FROM scanned_pages WHERE documentId = :documentId")
   suspend fun deletePagesForDocument(documentId: String)
 
+  @Query("UPDATE scanned_documents SET title = :title, updatedAt = :updatedAt WHERE id = :documentId")
+  suspend fun updateDocumentTitle(documentId: String, title: String, updatedAt: Long)
+
   @Query("DELETE FROM scanned_documents WHERE id = :documentId")
   suspend fun deleteDocumentById(documentId: String)
 

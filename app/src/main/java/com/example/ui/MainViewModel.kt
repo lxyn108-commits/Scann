@@ -193,7 +193,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _batchState.update {
           it.copy(isImportingOrCapturing = false, processingMessage = null, retakingPageIndex = null)
         }
-        _snackbarMessages.tryEmit("Capture failed: ${err.localizedMessage ?: "Unknown error"}")
+        _snackbarMessages.tryEmit("Gagal memotret: ${err.localizedMessage ?: "Terjadi kesalahan"}")
       }
     }
   }
@@ -205,7 +205,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       _batchState.update {
         it.copy(
           isImportingOrCapturing = true,
-          processingMessage = "Importing ${uris.size} page(s) & running OCR…",
+          processingMessage = "Mengimpor ${uris.size} halaman & memindai OCR…",
         )
       }
       val newPages = mutableListOf<DraftPage>()
@@ -217,7 +217,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       }
       if (newPages.isEmpty()) {
         _batchState.update { it.copy(isImportingOrCapturing = false, processingMessage = null) }
-        _snackbarMessages.tryEmit("Could not read selected image(s).")
+        _snackbarMessages.tryEmit("Tidak dapat membaca gambar yang dipilih.")
         return@launch
       }
       _batchState.update { current ->
@@ -384,7 +384,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     if (state.pages.isEmpty()) return
     viewModelScope.launch {
       _batchState.update {
-        it.copy(isImportingOrCapturing = true, processingMessage = "Applying ${filter.displayName} to batch…")
+        it.copy(isImportingOrCapturing = true, processingMessage = "Menerapkan ${filter.displayName} ke semua halaman…")
       }
       val updatedList = state.pages.map { page ->
         runCatching { repository.reprocessPage(page, filter = filter) }.getOrDefault(page)
@@ -479,7 +479,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     viewModelScope.launch {
       _batchState.update {
-        it.copy(isSavingPdf = true, processingMessage = "Embedding OCR layer into Searchable PDF…")
+        it.copy(isSavingPdf = true, processingMessage = "Menyematkan lapisan OCR ke PDF…")
       }
       runCatching {
         repository.saveBatchDocument(
@@ -489,11 +489,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
       }.onSuccess { docId ->
         _batchState.value = BatchReviewUiState()
-        _snackbarMessages.tryEmit("Searchable PDF saved (${state.pages.size} page${if (state.pages.size == 1) "" else "s"})")
+        _snackbarMessages.tryEmit("PDF Searchable tersimpan (${state.pages.size} halaman)")
         onSaved(docId)
       }.onFailure { err ->
         _batchState.update { it.copy(isSavingPdf = false, processingMessage = null) }
-        _snackbarMessages.tryEmit("Failed to create PDF: ${err.localizedMessage ?: "Error"}")
+        _snackbarMessages.tryEmit("Gagal membuat PDF: ${err.localizedMessage ?: "Error"}")
       }
     }
   }
@@ -501,10 +501,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun observeDocument(documentId: String): Flow<DocumentWithPages?> =
     repository.observeDocumentWithPages(documentId)
 
+  fun renameDocument(documentId: String, newTitle: String) {
+    val clean = newTitle.trim()
+    if (clean.isEmpty()) return
+    viewModelScope.launch {
+      repository.renameDocument(documentId, clean)
+      _snackbarMessages.tryEmit("Judul dokumen diperbarui")
+    }
+  }
+
   fun deleteDocument(documentId: String, onDeleted: (() -> Unit)? = null) {
     viewModelScope.launch {
       repository.deleteDocument(documentId)
-      _snackbarMessages.tryEmit("Document deleted")
+      _snackbarMessages.tryEmit("Dokumen dihapus")
       onDeleted?.invoke()
     }
   }
@@ -513,12 +522,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     viewModelScope.launch {
       val file = File(pdfPath)
       if (!file.exists()) {
-        _snackbarMessages.tryEmit("PDF file not found.")
+        _snackbarMessages.tryEmit("File PDF tidak ditemukan.")
         return@launch
       }
       ExportManager.writeFileToUri(getApplication(), file, destinationUri)
-        .onSuccess { _snackbarMessages.tryEmit("Searchable PDF saved to device") }
-        .onFailure { _snackbarMessages.tryEmit("Failed to save PDF") }
+        .onSuccess { _snackbarMessages.tryEmit("PDF Searchable tersimpan ke perangkat") }
+        .onFailure { _snackbarMessages.tryEmit("Gagal menyimpan PDF") }
     }
   }
 
@@ -528,9 +537,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val textPdf = repository.generateTextOnlyPdfFile(docWithPages)
         ExportManager.writeFileToUri(getApplication(), textPdf, destinationUri).getOrThrow()
       }.onSuccess {
-        _snackbarMessages.tryEmit("Formatted Text PDF saved")
+        _snackbarMessages.tryEmit("PDF Teks Rapi tersimpan")
       }.onFailure {
-        _snackbarMessages.tryEmit("Failed to export Text PDF")
+        _snackbarMessages.tryEmit("Gagal mengekspor PDF Teks")
       }
     }
   }
@@ -538,7 +547,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun shareSearchablePdf(doc: ScannedDocumentEntity) {
     val file = File(doc.pdfPath)
     if (!file.exists()) {
-      _snackbarMessages.tryEmit("PDF file unavailable")
+      _snackbarMessages.tryEmit("File PDF tidak tersedia")
       return
     }
     ExportManager.sharePdf(getApplication(), file, doc.title)
@@ -549,10 +558,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       val files = docWithPages.pages.sortedBy { it.pageOrder }.map { File(it.enhancedImagePath) }
       ExportManager.exportImagesToGallery(getApplication(), files, docWithPages.document.title)
         .onSuccess { count ->
-          _snackbarMessages.tryEmit("Saved $count image${if (count == 1) "" else "s"} to Pictures/ClearScan")
+          _snackbarMessages.tryEmit("$count gambar tersimpan ke Pictures/ClearScan")
         }
         .onFailure {
-          _snackbarMessages.tryEmit("Could not save images to Gallery")
+          _snackbarMessages.tryEmit("Tidak dapat menyimpan gambar ke Galeri")
         }
     }
   }
@@ -569,11 +578,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun copyOcrText(title: String, text: String) {
     if (text.isBlank()) {
-      _snackbarMessages.tryEmit("No OCR text to copy")
+      _snackbarMessages.tryEmit("Tidak ada teks OCR untuk disalin")
       return
     }
     ExportManager.copyTextToClipboard(getApplication(), title, text)
-    _snackbarMessages.tryEmit("OCR text copied to clipboard")
+    _snackbarMessages.tryEmit("Teks OCR disalin ke papan klip")
   }
 
   fun notifyMessage(message: String) {

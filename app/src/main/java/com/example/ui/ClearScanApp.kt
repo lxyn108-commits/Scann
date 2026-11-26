@@ -67,6 +67,12 @@ fun ClearScanApp(
         onOpenDocument = { docId ->
           navController.navigate(ClearScanRoutes.viewerRoute(docId))
         },
+        onEditDocument = { id ->
+          mainViewModel.openDocumentForEditing(id) {
+            navController.navigate(ClearScanRoutes.ROUTE_BATCH_REVIEW)
+          }
+        },
+        onRenameDocument = mainViewModel::renameDocument,
         onSharePdf = mainViewModel::shareSearchablePdf,
         onDeleteDocument = { docId -> mainViewModel.deleteDocument(docId) },
       )
@@ -170,6 +176,7 @@ fun ClearScanApp(
             navController.navigate(ClearScanRoutes.ROUTE_BATCH_REVIEW)
           }
         },
+        onRenameDocument = mainViewModel::renameDocument,
         onDeleteDocument = { id ->
           mainViewModel.deleteDocument(id) {
             navController.popBackStack()

@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Image
@@ -106,6 +107,7 @@ fun DocumentViewerScreen(
   snackbarHostState: SnackbarHostState,
   onBack: () -> Unit,
   onEditDocument: (String) -> Unit,
+  onRenameDocument: (String, String) -> Unit,
   onDeleteDocument: (String) -> Unit,
   onSaveSearchablePdfUri: (String, Uri) -> Unit,
   onSaveTextPdfUri: (DocumentWithPages, Uri) -> Unit,
@@ -115,11 +117,13 @@ fun DocumentViewerScreen(
   onCopyText: (String, String) -> Unit,
 ) {
   val scope = rememberCoroutineScope()
-  var selectedTab by remember { mutableIntStateOf(0) } // 0 = Pages, 1 = OCR Text
+  var selectedTab by remember { mutableIntStateOf(0) } // 0 = Halaman, 1 = Teks OCR
   var inDocSearch by remember { mutableStateOf("") }
   var showOcrBoxes by remember { mutableStateOf(false) }
   var showExportSheet by remember { mutableStateOf(false) }
   var showDeleteDialog by remember { mutableStateOf(false) }
+  var showRenameDialog by remember { mutableStateOf(false) }
+  var renameText by remember { mutableStateOf("") }
 
   val saveSearchablePdfLauncher = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.CreateDocument("application/pdf"),
@@ -199,7 +203,7 @@ fun DocumentViewerScreen(
               overflow = TextOverflow.Ellipsis,
             )
             Text(
-              text = "${orderedPages.size} page${if (orderedPages.size == 1) "" else "s"} • Searchable PDF",
+              text = "${orderedPages.size} halaman • PDF Searchable",
               style = MaterialTheme.typography.labelMedium,
               color = MaterialTheme.colorScheme.secondary,
             )
@@ -210,15 +214,24 @@ fun DocumentViewerScreen(
             onClick = onBack,
             modifier = Modifier.testTag("viewer_back_button"),
           ) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to library")
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Kembali ke daftar")
           }
         },
         actions = {
           IconButton(
+            onClick = {
+              renameText = doc.title
+              showRenameDialog = true
+            },
+            modifier = Modifier.testTag("viewer_rename_button"),
+          ) {
+            Icon(Icons.Filled.DriveFileRenameOutline, contentDescription = "Ubah judul")
+          }
+          IconButton(
             onClick = { onEditDocument(doc.id) },
             modifier = Modifier.testTag("viewer_edit_button"),
           ) {
-            Icon(Icons.Filled.Edit, contentDescription = "Edit batch pages")
+            Icon(Icons.Filled.Edit, contentDescription = "Edit halaman")
           }
           IconButton(
             onClick = { showDeleteDialog = true },
@@ -226,7 +239,7 @@ fun DocumentViewerScreen(
           ) {
             Icon(
               Icons.Filled.DeleteOutline,
-              contentDescription = "Delete document",
+              contentDescription = "Hapus dokumen",
               tint = MaterialTheme.colorScheme.error,
             )
           }
@@ -272,7 +285,7 @@ fun DocumentViewerScreen(
           ) {
             Icon(Icons.Filled.IosShare, contentDescription = null)
             Spacer(Modifier.width(8.dp))
-            Text("Export PDF / Img")
+            Text("Ekspor PDF / Img")
           }
         }
       }
@@ -301,7 +314,7 @@ fun DocumentViewerScreen(
             shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
             modifier = Modifier.testTag("viewer_tab_pages"),
           ) {
-            Text("PDF Pages")
+            Text("Halaman PDF")
           }
           SegmentedButton(
             selected = selectedTab == 1,
@@ -309,7 +322,7 @@ fun DocumentViewerScreen(
             shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
             modifier = Modifier.testTag("viewer_tab_text"),
           ) {
-            Text("OCR Text")
+            Text("Teks OCR")
           }
         }
 
@@ -335,12 +348,12 @@ fun DocumentViewerScreen(
       OutlinedTextField(
         value = inDocSearch,
         onValueChange = { inDocSearch = it },
-        placeholder = { Text("Find text in this document…") },
+        placeholder = { Text("Cari teks dalam dokumen ini…") },
         leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
         trailingIcon = {
           if (inDocSearch.isNotEmpty()) {
             IconButton(onClick = { inDocSearch = "" }) {
-              Icon(Icons.Filled.Close, contentDescription = "Clear search")
+              Icon(Icons.Filled.Close, contentDescription = "Hapus pencarian")
             }
           }
         },
@@ -350,9 +363,9 @@ fun DocumentViewerScreen(
           focusedContainerColor = MaterialTheme.colorScheme.surface,
           unfocusedContainerColor = MaterialTheme.colorScheme.surface,
         ),
-      modifier = Modifier
-        .fillMaxWidth()
-        .testTag("viewer_search_input"),
+        modifier = Modifier
+          .fillMaxWidth()
+          .testTag("viewer_search_input"),
       )
 
       if (smartActions.isNotEmpty() && trimmedQuery.isEmpty()) {
@@ -377,10 +390,10 @@ fun DocumentViewerScreen(
                   DocumentActionType.PHONE -> {
                     val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${action.value}"))
                     runCatching { context.startActivity(intent) }
-                      .onFailure { onCopyText("Phone", action.value) }
+                      .onFailure { onCopyText("Telepon", action.value) }
                   }
                   DocumentActionType.AMOUNT -> {
-                    onCopyText("Amount", action.value)
+                    onCopyText("Nominal", action.value)
                   }
                 }
               },
@@ -406,7 +419,7 @@ fun DocumentViewerScreen(
       if (trimmedQuery.isNotEmpty()) {
         if (matchCountsPerPage.isEmpty()) {
           Text(
-            text = "No matches for \"$trimmedQuery\"",
+            text = "Tidak ada kecocokan untuk \"$trimmedQuery\"",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
@@ -422,7 +435,7 @@ fun DocumentViewerScreen(
                   selectedTab = 0
                   scope.launch { pagerState.animateScrollToPage(pageIdx) }
                 },
-                label = { Text("Page ${pageIdx + 1} ($count)") },
+                label = { Text("Hal ${pageIdx + 1} ($count)") },
               )
             }
           }
@@ -455,7 +468,7 @@ fun DocumentViewerScreen(
                 ocrLines = parsedOcrByPage.getOrElse(pageIdx) { emptyList() },
                 showOcrBoxes = showOcrBoxes,
                 searchQuery = trimmedQuery,
-                contentDescription = "${doc.title} page ${pageIdx + 1}",
+                contentDescription = "${doc.title} halaman ${pageIdx + 1}",
                 modifier = Modifier.fillMaxSize(),
               )
             }
@@ -468,7 +481,7 @@ fun DocumentViewerScreen(
                 .padding(8.dp),
             ) {
               Text(
-                text = "Page ${pagerState.currentPage + 1} / ${orderedPages.size}",
+                text = "Hal ${pagerState.currentPage + 1} / ${orderedPages.size}",
                 style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
               )
@@ -493,7 +506,7 @@ fun DocumentViewerScreen(
               verticalAlignment = Alignment.CenterVertically,
             ) {
               Text(
-                text = "Layout-Preserved OCR Text",
+                text = "Teks OCR Sesuai Tata Letak",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
               )
@@ -514,7 +527,7 @@ fun DocumentViewerScreen(
             SelectionContainer {
               Text(
                 text = doc.fullOcrText.ifBlank {
-                  "No text was recognized in this scan. Try applying the Crisp B&W or Magic Color filter in Edit Pages."
+                  "Belum ada teks terbaca pada pindaian ini. Coba gunakan filter Hitam Putih atau Warna di menu Edit Halaman."
                 },
                 style = MaterialTheme.typography.labelMedium.copy(
                   lineHeight = MaterialTheme.typography.bodyLarge.lineHeight,
@@ -546,14 +559,14 @@ fun DocumentViewerScreen(
           .padding(bottom = 20.dp),
       ) {
         Text(
-          text = "Export Document",
+          text = "Ekspor Dokumen",
           style = MaterialTheme.typography.titleLarge,
           modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
         )
 
         ListItem(
-          headlineContent = { Text("Save Searchable PDF to Device") },
-          supportingContent = { Text("High-clarity scanned pages + invisible OCR text layer") },
+          headlineContent = { Text("Simpan PDF Searchable ke Perangkat") },
+          supportingContent = { Text("Halaman pindaian tajam + lapisan teks OCR yang bisa dicari") },
           leadingContent = {
             Icon(
               Icons.Filled.PictureAsPdf,
@@ -570,8 +583,8 @@ fun DocumentViewerScreen(
         )
 
         ListItem(
-          headlineContent = { Text("Save Formatted Text-Only PDF") },
-          supportingContent = { Text("Lightweight pure vector text PDF preserving layout") },
+          headlineContent = { Text("Simpan PDF Teks Rapi") },
+          supportingContent = { Text("PDF teks vektor ringan dengan tata letak dokumen asli") },
           leadingContent = {
             Icon(
               Icons.Filled.Description,
@@ -588,8 +601,8 @@ fun DocumentViewerScreen(
         )
 
         ListItem(
-          headlineContent = { Text("Share Searchable PDF") },
-          supportingContent = { Text("Send via email, messaging, or cloud drive") },
+          headlineContent = { Text("Bagikan PDF Searchable") },
+          supportingContent = { Text("Kirim lewat WhatsApp, email, atau Google Drive") },
           leadingContent = { Icon(Icons.Filled.Share, contentDescription = null) },
           modifier = Modifier
             .clickable {
@@ -602,8 +615,8 @@ fun DocumentViewerScreen(
         HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
         ListItem(
-          headlineContent = { Text("Save All Page Images to Gallery") },
-          supportingContent = { Text("Exports ${orderedPages.size} crisp JPEG image(s) to Pictures/ClearScan") },
+          headlineContent = { Text("Simpan Semua Gambar ke Galeri") },
+          supportingContent = { Text("Ekspor ${orderedPages.size} gambar JPEG tajam ke Pictures/ClearScan") },
           leadingContent = {
             Icon(
               Icons.Filled.Download,
@@ -620,8 +633,8 @@ fun DocumentViewerScreen(
         )
 
         ListItem(
-          headlineContent = { Text("Share Current Page Image") },
-          supportingContent = { Text("Export page ${pagerState.currentPage + 1} as JPEG") },
+          headlineContent = { Text("Bagikan Gambar Halaman Ini") },
+          supportingContent = { Text("Ekspor halaman ${pagerState.currentPage + 1} sebagai JPEG") },
           leadingContent = { Icon(Icons.Filled.Image, contentDescription = null) },
           modifier = Modifier
             .clickable {
@@ -633,8 +646,8 @@ fun DocumentViewerScreen(
 
         if (orderedPages.size > 1) {
           ListItem(
-            headlineContent = { Text("Share All ${orderedPages.size} Page Images") },
-            supportingContent = { Text("Export every scanned page as individual JPEGs") },
+            headlineContent = { Text("Bagikan Semua ${orderedPages.size} Gambar") },
+            supportingContent = { Text("Ekspor seluruh halaman pindaian sebagai file JPEG") },
             leadingContent = { Icon(Icons.Filled.Image, contentDescription = null) },
             modifier = Modifier
               .clickable {
@@ -648,11 +661,49 @@ fun DocumentViewerScreen(
     }
   }
 
+  if (showRenameDialog) {
+    AlertDialog(
+      onDismissRequest = { showRenameDialog = false },
+      title = { Text("Ubah Judul Dokumen") },
+      text = {
+        OutlinedTextField(
+          value = renameText,
+          onValueChange = { renameText = it },
+          singleLine = true,
+          label = { Text("Judul dokumen") },
+          modifier = Modifier
+            .fillMaxWidth()
+            .testTag("viewer_rename_input"),
+        )
+      },
+      confirmButton = {
+        TextButton(
+          onClick = {
+            val clean = renameText.trim()
+            if (clean.isNotEmpty()) {
+              onRenameDocument(doc.id, clean)
+            }
+            showRenameDialog = false
+          },
+          enabled = renameText.isNotBlank(),
+          modifier = Modifier.testTag("viewer_rename_confirm"),
+        ) {
+          Text("Simpan")
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { showRenameDialog = false }) {
+          Text("Batal")
+        }
+      },
+    )
+  }
+
   if (showDeleteDialog) {
     AlertDialog(
       onDismissRequest = { showDeleteDialog = false },
-      title = { Text("Delete Document?") },
-      text = { Text("This removes \"${doc.title}\" and its generated Searchable PDF from your device.") },
+      title = { Text("Hapus Dokumen?") },
+      text = { Text("Dokumen \"${doc.title}\" dan file PDF Searchable-nya akan dihapus dari perangkat.") },
       confirmButton = {
         TextButton(
           onClick = {
@@ -660,12 +711,12 @@ fun DocumentViewerScreen(
             onDeleteDocument(doc.id)
           },
         ) {
-          Text("Delete", color = MaterialTheme.colorScheme.error)
+          Text("Hapus", color = MaterialTheme.colorScheme.error)
         }
       },
       dismissButton = {
         TextButton(onClick = { showDeleteDialog = false }) {
-          Text("Cancel")
+          Text("Batal")
         }
       },
     )

@@ -310,6 +310,12 @@ class ScanRepository(
       SearchablePdfGenerator.generateTextOnlyPdf(inputs, out, docWithPages.document.title)
     }
 
+  suspend fun renameDocument(documentId: String, newTitle: String) = withContext(Dispatchers.IO) {
+    val clean = newTitle.trim()
+    if (clean.isEmpty()) return@withContext
+    scanDao.updateDocumentTitle(documentId, clean, System.currentTimeMillis())
+  }
+
   suspend fun deleteDocument(documentId: String) = withContext(Dispatchers.IO) {
     val existing = scanDao.getDocumentWithPages(documentId)
     scanDao.deleteDocumentById(documentId)
