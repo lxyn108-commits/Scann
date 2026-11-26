@@ -70,6 +70,7 @@ object SmartScanAdvisor {
     val clean = raw.replace(Regex("\\s+"), " ").trim()
     if (clean.length !in 5..40) return false
     if (clean.any { it in maskedOrNoiseChars }) return false
+    if (clean.startsWith('-') || clean.endsWith('-') || clean.endsWith('—')) return false
 
     val nonSpace = clean.filterNot { it.isWhitespace() }
     if (nonSpace.isEmpty()) return false
@@ -81,6 +82,10 @@ object SmartScanAdvisor {
 
     val words = clean.split(' ').filter { token -> token.any { it.isLetter() } }
     if (words.isEmpty()) return false
+    // Avoid OCR artifacts where a stray digit glues onto uppercase text (e.g. "1DLA MOND-")
+    if (words.any { it.first().isDigit() && it.count(Char::isLetter) >= 2 && it.count(Char::isDigit) == 1 }) {
+      return false
+    }
     // Avoid fragmented single tiny OCR tokens (e.g., "Rec", "Telp") while keeping real titles/brands
     if (words.size == 1 && words[0].length < 6) return false
     return true

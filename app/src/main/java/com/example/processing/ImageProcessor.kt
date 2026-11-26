@@ -173,7 +173,7 @@ class ImageProcessor {
       base[i] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
     }
 
-    return applyUnsharpMask(base, width, height, strength = 0.46f)
+    return applyUnsharpMask(base, width, height, strength = 0.34f)
   }
 
   internal fun enhanceGrayscaleBuffer(
@@ -206,7 +206,7 @@ class ImageProcessor {
       base[i] = (0xFF shl 24) or (outLum shl 16) or (outLum shl 8) or outLum
     }
 
-    return applyUnsharpMask(base, width, height, strength = 0.42f)
+    return applyUnsharpMask(base, width, height, strength = 0.30f)
   }
 
   internal fun enhanceBlackAndWhiteBuffer(
@@ -299,9 +299,11 @@ class ImageProcessor {
       }
     }
 
-    val bgR = smooth3x3Envelope(dilate5x5(rGrid, gridW, gridH), gridW, gridH)
-    val bgG = smooth3x3Envelope(dilate5x5(gGrid, gridW, gridH), gridW, gridH)
-    val bgB = smooth3x3Envelope(dilate5x5(bGrid, gridW, gridH), gridW, gridH)
+    // Morphological Closing (dilate5x5 -> erode5x5) bridges dark strokes/logos cleanly
+    // while pulling bright regions back off shadowed edges so shaded margins lift evenly to white.
+    val bgR = smooth3x3Envelope(erode5x5(dilate5x5(rGrid, gridW, gridH), gridW, gridH), gridW, gridH)
+    val bgG = smooth3x3Envelope(erode5x5(dilate5x5(gGrid, gridW, gridH), gridW, gridH), gridW, gridH)
+    val bgB = smooth3x3Envelope(erode5x5(dilate5x5(bGrid, gridW, gridH), gridW, gridH), gridW, gridH)
 
     val out = IntArray(w * h)
     val targetWhite = 252f
@@ -328,22 +330,22 @@ class ImageProcessor {
         val w01 = (1f - wx) * wy
         val w11 = wx * wy
 
-        val br = (bgR[row0 + gx0] * w00 + bgR[row0 + gx1] * w10 + bgR[row1 + gx0] * w01 + bgR[row1 + gx1] * w11).coerceAtLeast(64f)
-        val bg = (bgG[row0 + gx0] * w00 + bgG[row0 + gx1] * w10 + bgG[row1 + gx0] * w01 + bgG[row1 + gx1] * w11).coerceAtLeast(64f)
-        val bb = (bgB[row0 + gx0] * w00 + bgB[row0 + gx1] * w10 + bgB[row1 + gx0] * w01 + bgB[row1 + gx1] * w11).coerceAtLeast(64f)
+        val br = (bgR[row0 + gx0] * w00 + bgR[row0 + gx1] * w10 + bgR[row1 + gx0] * w01 + bgR[row1 + gx1] * w11).coerceAtLeast(56f)
+        val bg = (bgG[row0 + gx0] * w00 + bgG[row0 + gx1] * w10 + bgG[row1 + gx0] * w01 + bgG[row1 + gx1] * w11).coerceAtLeast(56f)
+        val bb = (bgB[row0 + gx0] * w00 + bgB[row0 + gx1] * w10 + bgB[row1 + gx0] * w01 + bgB[row1 + gx1] * w11).coerceAtLeast(56f)
 
-        val bgLum = (0.299f * br + 0.587f * bg + 0.114f * bb).coerceAtLeast(64f)
+        val bgLum = (0.299f * br + 0.587f * bg + 0.114f * bb).coerceAtLeast(56f)
         val bgChroma = max(br, max(bg, bb)) - min(br, min(bg, bb))
 
         val castNeutralize = 1f - smoothstep(46f, 80f, bgChroma) * 0.80f
-        val minAllowed = max(64f, bgLum * 0.78f)
+        val minAllowed = max(56f, bgLum * 0.78f)
         val effR = max(minAllowed, br * castNeutralize + bgLum * (1f - castNeutralize))
         val effG = max(minAllowed, bg * castNeutralize + bgLum * (1f - castNeutralize))
         val effB = max(minAllowed, bb * castNeutralize + bgLum * (1f - castNeutralize))
 
-        val gainR = (targetWhite / effR).coerceIn(0.85f, 2.55f)
-        val gainG = (targetWhite / effG).coerceIn(0.85f, 2.55f)
-        val gainB = (targetWhite / effB).coerceIn(0.85f, 2.55f)
+        val gainR = (targetWhite / effR).coerceIn(0.85f, 2.75f)
+        val gainG = (targetWhite / effG).coerceIn(0.85f, 2.75f)
+        val gainB = (targetWhite / effB).coerceIn(0.85f, 2.75f)
 
         val c = srcPixels[dstRow + x]
         val r = ((c ushr 16) and 0xFF).toFloat()
@@ -386,6 +388,28 @@ class ImageProcessor {
           }
         }
         out[y * w + x] = maxV
+      }
+    }
+    return out
+  }
+
+  private fun erode5x5(src: IntArray, w: Int, h: Int): IntArray {
+    val out = IntArray(w * h)
+    for (y in 0 until h) {
+      val y0 = max(0, y - 2)
+      val y1 = min(h - 1, y + 2)
+      for (x in 0 until w) {
+        val x0 = max(0, x - 2)
+        val x1 = min(w - 1, x + 2)
+        var minV = 255
+        for (yy in y0..y1) {
+          val ro = yy * w
+          for (xx in x0..x1) {
+            val v = src[ro + xx]
+            if (v < minV) minV = v
+          }
+        }
+        out[y * w + x] = minV
       }
     }
     return out

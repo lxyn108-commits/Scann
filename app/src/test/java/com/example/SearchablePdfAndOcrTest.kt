@@ -667,16 +667,130 @@ class SearchablePdfAndOcrTest {
     val margins = DocumentImageProcessor.detectCurvedEdgeMargins(deepCurve, w, h, meshDivs = 8)
     assertTrue("14% curved dip should be detected", margins.hasAdjustment)
     assertTrue("Center column top margin=${margins.topFrac[4]} should detect >0.11", margins.topFrac[4] > 0.11f)
+  }
 
-    // Simulate tiny residual green corner triangle inside outer 3% perimeter
-    val cornerImg = IntArray(w * h) { paperWhite }
-    cornerImg[0] = greenDesk
-    cornerImg[1] = greenDesk
-    cornerImg[w] = greenDesk
-    val cleaned = DocumentImageProcessor.cleanResidualDeskCornersBuffer(cornerImg, w, h)
-    assertTrue("Residual corner triangle should be cleaned", cleaned)
-    assertEquals(0xFFFFFFFF.toInt(), cornerImg[0])
-    assertEquals(0xFFFFFFFF.toInt(), cornerImg[1])
+  @Test
+  fun imageProcessorLiftsShadedEdgeMarginsWithoutBlotchesOrInvertingPerimeterText() {
+    val w = 160
+    val h = 160
+    val pixels = IntArray(w * h)
+    for (y in 0 until h) {
+      for (x in 0 until w) {
+        // Lit center (~225) with shaded right (x > 120) and bottom (y > 125) margins (~132)
+        val inRightShadow = x >= 122
+        val inBottomShadow = y >= 126
+        val base = when {
+          inRightShadow && inBottomShadow -> 124
+          inRightShadow || inBottomShadow -> 132
+          else -> 226
+        }
+        pixels[y * w + x] = (0xFF shl 24) or (base shl 16) or (base shl 8) or (base + 2).coerceAtMost(255)
+      }
+    }
+
+    // Dark blue printed text sitting right inside the outer 2% top & bottom perimeter
+    // (previously inverted to white-on-brown by perimeter cleanup!)
+    val darkBlueInk = (0xFF shl 24) or (35 shl 16) or (70 shl 8) or 120
+    for (x in 20..110) {
+      pixels[1 * w + x] = darkBlueInk
+      pixels[2 * w + x] = darkBlueInk
+      pixels[(h - 2) * w + x] = darkBlueInk
+      pixels[(h - 3) * w + x] = darkBlueInk
+    }
+
+    val out = ImageProcessor().enhanceMagicColorBuffer(pixels, w, h, removeShadowAndGlare = true)
+
+    // Shaded paper margins must lift cleanly to white (>= 245), with zero dark brown blotches
+    val shadedMarginSamples = listOf(
+      out[50 * w + 145],
+      out[145 * w + 50],
+      out[145 * w + 145],
+    )
+    for ((idx, px) in shadedMarginSamples.withIndex()) {
+      val r = (px ushr 16) and 0xFF
+      val g = (px ushr 8) and 0xFF
+      val b = px and 0xFF
+      assertTrue(
+        "Shaded margin #$idx must lift cleanly to white (RGB=$r,$g,$b)",
+        r >= 245 && g >= 245 && b >= 245,
+      )
+    }
+
+    // Top & bottom perimeter text must remain dark & legible (never inverted to white!)
+    for (py in listOf(1, h - 2)) {
+      val txt = out[py * w + 60]
+      val lum = (((txt ushr 16) and 0xFF) * 77 + ((txt ushr 8) and 0xFF) * 150 + (txt and 0xFF) * 29) ushr 8
+      assertTrue("Perimeter text at y=$py must stay dark (lum=$lum), not inverted", lum < 120)
+    }
+  }
+
+  @Test
+  fun documentQuadDetectorFramesFullFolded3PanelReceiptOnTealFloralSheet() {
+    val w = 120
+    val h = 160
+    val yArr = IntArray(w * h)
+    val uArr = IntArray(w * h)
+    val vArr = IntArray(w * h)
+
+    // Dark teal floral bedsheet with cream petals in corners & surrounding margins
+    for (yy in 0 until h) {
+      for (xx in 0 until w) {
+        val nx = xx.toFloat() / w
+        val ny = yy.toFloat() / h
+        val isCreamPetal =
+          ((nx - 0.14f) * (nx - 0.14f) + (ny - 0.16f) * (ny - 0.16f) < 0.012f) ||
+            ((nx - 0.84f) * (nx - 0.84f) + (ny - 0.82f) * (ny - 0.82f) < 0.015f) ||
+            ((nx - 0.78f) * (nx - 0.78f) + (ny - 0.28f) * (ny - 0.28f) < 0.008f)
+        val idx = yy * w + xx
+        if (isCreamPetal) {
+          yArr[idx] = 184
+          uArr[idx] = 121
+          vArr[idx] = 131
+        } else {
+          yArr[idx] = 58
+          uArr[idx] = 138
+          vArr[idx] = 114
+        }
+      }
+    }
+
+    // Horizontal 3-panel folded receipt spanning x=0.17..0.89, y=0.42..0.64 (~20..107, 67..102)
+    val rx0 = (w * 0.17f).toInt()
+    val rx1 = (w * 0.89f).toInt()
+    val ry0 = (h * 0.42f).toInt()
+    val ry1 = (h * 0.64f).toInt()
+    val crease1 = (w * 0.38f).toInt()
+    val crease2 = (w * 0.68f).toInt()
+
+    for (yy in ry0..ry1) {
+      for (xx in rx0..rx1) {
+        val idx = yy * w + xx
+        val inCenterPanel = xx in crease1..crease2
+        var paperY = if (inCenterPanel) 218 else 144
+        // Vertical crease shading gradient at panel folds
+        if (kotlin.math.abs(xx - crease1) <= 1 || kotlin.math.abs(xx - crease2) <= 1) {
+          paperY = 128
+        }
+        // Horizontal printed table borders across all 3 panels
+        if (yy == (h * 0.48f).toInt() || yy == (h * 0.60f).toInt()) {
+          paperY = 62
+        }
+        // Printed text strokes distributed across left, center, and right panels
+        if ((yy in (ry0 + 3)..(ry1 - 3) step 3) && (xx in (rx0 + 3)..(rx1 - 3) step 3)) {
+          paperY = 70
+        }
+        yArr[idx] = paperY
+        uArr[idx] = 128
+        vArr[idx] = 128
+      }
+    }
+
+    val quad = DocumentQuadDetector.detectFromYuvGrid(yArr, uArr, vArr, w, h)
+    assertNotNull("Folded 3-panel receipt must be detected", quad)
+    val leftEdge = (quad!!.topLeft.x + quad.bottomLeft.x) * 0.5f
+    val rightEdge = (quad.topRight.x + quad.bottomRight.x) * 0.5f
+    assertTrue("Left edge ($leftEdge) must frame outer left panel (<0.25), not crease", leftEdge < 0.25f)
+    assertTrue("Right edge ($rightEdge) must frame outer right panel (>0.80), not crease", rightEdge > 0.80f)
   }
 
   @Test
@@ -692,6 +806,7 @@ class SearchablePdfAndOcrTest {
         lines = listOf(
           OcrLineBox("a***ka b***y", 0.6f, 0.05f, 0.9f, 0.09f, emptyList()),
           OcrLineBox("aca *y", 0.6f, 0.10f, 0.8f, 0.13f, emptyList()),
+          OcrLineBox("1DLA MOND-", 0.4f, 0.11f, 0.6f, 0.14f, emptyList()),
           OcrLineBox("Rec", 0.1f, 0.12f, 0.2f, 0.15f, emptyList()),
           OcrLineBox("SEMAR Nusantara", 0.2f, 0.14f, 0.5f, 0.20f, emptyList()),
         ),
@@ -702,6 +817,7 @@ class SearchablePdfAndOcrTest {
 
     val titles = SmartScanAdvisor.suggestTitles(listOf(draft))
     assertFalse("Masked PII must not appear in title suggestions: $titles", titles.any { it.contains("*") })
+    assertFalse("OCR digit-glued dash noise '1DLA MOND-' must not appear in titles: $titles", titles.contains("1DLA MOND-"))
     assertFalse("Tiny fragment 'Rec' must not appear in title suggestions: $titles", titles.contains("Rec"))
     assertTrue("Clean store title should be promoted: $titles", titles.contains("SEMAR Nusantara"))
 

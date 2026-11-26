@@ -211,6 +211,8 @@ fun BatchReviewScreen(
           colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.primary,
             contentColor = Color.White,
+            disabledContainerColor = Color.White.copy(alpha = 0.14f),
+            disabledContentColor = Color.White.copy(alpha = 0.45f),
           ),
           contentPadding = PaddingValues(horizontal = 18.dp, vertical = 9.dp),
           modifier = Modifier.testTag("save_searchable_pdf_button"),

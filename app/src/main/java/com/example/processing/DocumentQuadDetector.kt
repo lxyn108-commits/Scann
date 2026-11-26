@@ -542,9 +542,11 @@ object DocumentQuadDetector {
       }
     }
 
-    val masks = ArrayList<BooleanArray>(3)
+    val masks = ArrayList<BooleanArray>(4)
     val distThresh = max(24, otsuThreshold(distMap))
     masks.add(morphologicalClose3x3(BooleanArray(n) { distMap[it] >= distThresh }, width, height))
+    val distThreshLow = max(16, (distThresh * 0.65f).toInt())
+    masks.add(morphologicalClose3x3(BooleanArray(n) { distMap[it] >= distThreshLow }, width, height))
 
     if (chromaDistMap != null) {
       val chromaThresh = max(20, otsuThreshold(chromaDistMap))
@@ -553,6 +555,10 @@ object DocumentQuadDetector {
 
     val yThresh = max(otsuThreshold(featY), bgMeanY + 18).coerceAtMost(232)
     masks.add(morphologicalClose3x3(BooleanArray(n) { featY[it] >= yThresh }, width, height))
+    if (bgMeanY < 145) {
+      val shadowPaperThresh = max(bgMeanY + 24, (yThresh * 0.74f).toInt()).coerceAtMost(190)
+      masks.add(morphologicalClose3x3(BooleanArray(n) { featY[it] >= shadowPaperThresh }, width, height))
+    }
 
     var bestQuad: NormalizedQuad? = null
     for (mask in masks) {
@@ -788,6 +794,10 @@ object DocumentQuadDetector {
       val centroidY = (sumY.toFloat() / compCount) / height
       val centerScore = computeViewfinderCenterScore(centroidX, centroidY)
       val detailBonus = measureInteriorDetail(detailMap, width, height, normQuad)
+      val interiorCutPenalty = computeInteriorCutPenalty(
+        featY, featU, featV, detailMap, width, height,
+        ordered[0], ordered[1], ordered[2], ordered[3],
+      )
 
       val confidence = (
         rectangularity * 0.26f +
@@ -797,7 +807,8 @@ object DocumentQuadDetector {
           sharpNmsSupport * 0.08f +
           centerScore * 0.10f +
           detailBonus * 0.08f -
-          clipPenalty
+          clipPenalty -
+          interiorCutPenalty
         ).coerceIn(0f, 1f)
 
       if (bestQuad == null || confidence > bestQuad.confidence) {
@@ -953,8 +964,8 @@ object DocumentQuadDetector {
             val minContrast = sideContrasts.minOrNull() ?: 0f
             if (sideContrasts.count { it >= 0.16f } < 3 && avgContrast < 0.22f) continue
 
-            val bisectionPenalty = measureInteriorBisectionPenalty(
-              nmsArr, width, height, tl, tr, br, bl, edgeThreshold * 0.75f,
+            val interiorCutPenalty = computeInteriorCutPenalty(
+              featY, featU, featV, detailMap, width, height, tl, tr, br, bl,
             )
             val clipPenalty = computeViewportClipPenalty(normQuad)
 
@@ -969,7 +980,7 @@ object DocumentQuadDetector {
               minContrast * 0.08f +
               centerScore * 0.10f +
               detailBonus * 0.08f -
-              bisectionPenalty -
+              interiorCutPenalty -
               clipPenalty
 
             if (score > bestScore) {
@@ -1054,30 +1065,97 @@ object DocumentQuadDetector {
     return (closeCount.toFloat() / boundary.size.toFloat()).coerceIn(0f, 1f)
   }
 
-  private fun measureInteriorBisectionPenalty(
-    edgeArr: FloatArray,
+  /**
+   * Penalizes candidate quads whose edges slice right through the middle of a folded/printed
+   * paper sheet (e.g. locking onto a vertical fold crease inside a receipt while printed paper
+   * continues immediately outside the boundary).
+   */
+  private fun computeInteriorCutPenalty(
+    featY: IntArray,
+    featU: IntArray?,
+    featV: IntArray?,
+    detailMap: FloatArray,
     width: Int,
     height: Int,
     tl: NormalizedPoint,
     tr: NormalizedPoint,
     br: NormalizedPoint,
     bl: NormalizedPoint,
-    edgeThreshold: Float,
   ): Float {
-    var maxSplit = 0f
-    for (frac in listOf(0.28f, 0.50f, 0.72f)) {
-      val leftPt = NormalizedPoint(tl.x + (bl.x - tl.x) * frac, tl.y + (bl.y - tl.y) * frac)
-      val rightPt = NormalizedPoint(tr.x + (br.x - tr.x) * frac, tr.y + (br.y - tr.y) * frac)
-      val s = measureSegmentEdgeSupport(edgeArr, width, height, leftPt, rightPt, edgeThreshold)
-      if (s > maxSplit) maxSplit = s
+    val cx = (tl.x + tr.x + br.x + bl.x) * 0.25f
+    val cy = (tl.y + tr.y + br.y + bl.y) * 0.25f
+    val sides = listOf(tl to tr, tr to br, br to bl, bl to tl)
+    val tSamples = listOf(0.25f, 0.42f, 0.58f, 0.75f)
+    var cutHits = 0f
+    var totalSamples = 0
+
+    for ((a, b) in sides) {
+      val ex = b.x - a.x
+      val ey = b.y - a.y
+      val len = hypot(ex, ey)
+      if (len < 8f) continue
+      var nx = -ey / len
+      var ny = ex / len
+      val midX = (a.x + b.x) * 0.5f
+      val midY = (a.y + b.y) * 0.5f
+      if (nx * (midX - cx) + ny * (midY - cy) < 0f) {
+        nx = -nx
+        ny = -ny
+      }
+
+      for (t in tSamples) {
+        val px = a.x + ex * t
+        val py = a.y + ey * t
+        val inX = (px - nx * 5f).roundToInt()
+        val inY = (py - ny * 5f).roundToInt()
+        val outX = (px + nx * 7f).roundToInt()
+        val outY = (py + ny * 7f).roundToInt()
+        if (inX !in 1 until width - 1 || inY !in 1 until height - 1 ||
+          outX !in 1 until width - 1 || outY !in 1 until height - 1
+        ) {
+          continue
+        }
+        totalSamples++
+        val iIn = inY * width + inX
+        val iOut = outY * width + outX
+
+        val yIn = featY[iIn]
+        val yOut = featY[iOut]
+        val chromaOut = if (featU != null && featV != null) {
+          abs(featU[iOut] - 128) + abs(featV[iOut] - 128)
+        } else {
+          0
+        }
+        val chromaDiff = if (featU != null && featV != null) {
+          abs(featU[iIn] - featU[iOut]) + abs(featV[iIn] - featV[iOut])
+        } else {
+          0
+        }
+        // Check if printed ink detail exists just outside the boundary
+        var outDetail = false
+        for (dy in -2..2) {
+          val yy = (outY + dy).coerceIn(0, height - 1)
+          val ro = yy * width
+          for (xx in -2..2) {
+            val xxC = (outX + xx).coerceIn(0, width - 1)
+            if (detailMap[ro + xxC] >= 8f) {
+              outDetail = true
+              break
+            }
+          }
+          if (outDetail) break
+        }
+
+        val bothNeutralPaper = yIn >= 115 && yOut >= 115 && chromaOut <= 20 && chromaDiff <= 18
+        if (bothNeutralPaper && (abs(yIn - yOut) <= 80 || outDetail)) {
+          cutHits += if (outDetail) 1.0f else 0.75f
+        }
+      }
     }
-    for (frac in listOf(0.28f, 0.50f, 0.72f)) {
-      val topPt = NormalizedPoint(tl.x + (tr.x - tl.x) * frac, tl.y + (tr.y - tl.y) * frac)
-      val botPt = NormalizedPoint(bl.x + (br.x - bl.x) * frac, bl.y + (br.y - bl.y) * frac)
-      val s = measureSegmentEdgeSupport(edgeArr, width, height, topPt, botPt, edgeThreshold)
-      if (s > maxSplit) maxSplit = s
-    }
-    return ((maxSplit - 0.50f).coerceAtLeast(0f) * 0.45f)
+
+    if (totalSamples == 0) return 0f
+    val ratio = cutHits / totalSamples.toFloat()
+    return (ratio * 0.42f).coerceIn(0f, 0.34f)
   }
 
   private fun boxBlur3x3(src: IntArray, width: Int, height: Int): IntArray {
