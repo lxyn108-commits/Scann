@@ -596,6 +596,11 @@ class SearchablePdfAndOcrTest {
       }
     }
 
+    // Thin medium-light gray thermal receipt stroke must stay clearly dark & legible (not erased!)
+    for (x in 25..65) {
+      pixels[72 * w + x] = (0xFF shl 24) or (162 shl 16) or (162 shl 8) or 165
+    }
+
     val out = ImageProcessor().enhanceMagicColorBuffer(pixels, w, h, removeShadowAndGlare = true)
 
     // Paper & watermark region should bleach to pure #FFFFFF
@@ -612,13 +617,35 @@ class SearchablePdfAndOcrTest {
     // Black text must compress firmly dark
     val textPixel = out[62 * w + 40]
     val textLum = (((textPixel ushr 16) and 0xFF) + ((textPixel ushr 8) and 0xFF) + (textPixel and 0xFF)) / 3
-    assertTrue("Body text must stay dark & sharp (lum=$textLum)", textLum < 55)
+    assertTrue("Body text must stay dark & sharp (lum=$textLum)", textLum < 50)
+
+    // Thin thermal receipt text stroke must remain clearly legible & darkened
+    val thinPixel = out[72 * w + 45]
+    val thinLum = (((thinPixel ushr 16) and 0xFF) + ((thinPixel ushr 8) and 0xFF) + (thinPixel and 0xFF)) / 3
+    assertTrue("Thin gray text stroke must NOT be erased (lum=$thinLum)", thinLum < 150)
 
     // Blue logo must stay vividly blue (B much stronger than R)
     val logoPixel = out[25 * w + 35]
     val lr = (logoPixel ushr 16) and 0xFF
     val lb = logoPixel and 0xFF
     assertTrue("Blue logo must remain vivid blue (R=$lr, B=$lb)", lb - lr >= 110)
+  }
+
+  @Test
+  fun documentImageProcessorDoesNotBendStraightEdgesOnSubtlePaperShadow() {
+    val w = 96
+    val h = 120
+    val paperWhite = (0xFF shl 24) or (242 shl 16) or (242 shl 8) or 244
+    val mildCornerShadow = (0xFF shl 24) or (132 shl 16) or (134 shl 8) or 136
+    val pixels = IntArray(w * h) { paperWhite }
+    // Subtle gray shadow along top-left corner (still paper, NOT colored desk)
+    for (y in 0 until 8) {
+      for (x in 0 until 20) {
+        pixels[y * w + x] = mildCornerShadow
+      }
+    }
+    val margins = DocumentImageProcessor.detectCurvedEdgeMargins(pixels, w, h, meshDivs = 8)
+    assertFalse("Subtle corner shadow must NOT bend straight paper borders", margins.hasAdjustment)
   }
 
   @Test

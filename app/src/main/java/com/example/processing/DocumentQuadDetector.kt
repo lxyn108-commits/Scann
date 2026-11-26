@@ -25,7 +25,7 @@ object DocumentQuadDetector {
 
   private const val MIN_ANGLE_DEG = -38
   private const val MAX_ANGLE_DEG = 38
-  private const val ANGLE_STEP_DEG = 2
+  private const val ANGLE_STEP_DEG = 1
   private val ANGLES_RAD: FloatArray = FloatArray((MAX_ANGLE_DEG - MIN_ANGLE_DEG) / ANGLE_STEP_DEG + 1) { idx ->
     ((MIN_ANGLE_DEG + idx * ANGLE_STEP_DEG) * PI / 180.0).toFloat()
   }
@@ -95,7 +95,7 @@ object DocumentQuadDetector {
     return quad to (uprightW to uprightH)
   }
 
-  fun detectFromBitmap(bitmap: Bitmap, targetMaxSide: Int = 160): NormalizedQuad? {
+  fun detectFromBitmap(bitmap: Bitmap, targetMaxSide: Int = 320): NormalizedQuad? {
     val scale = targetMaxSide.toFloat() / max(bitmap.width, bitmap.height).toFloat()
     val gridW = max(48, (bitmap.width * scale).roundToInt())
     val gridH = max(48, (bitmap.height * scale).roundToInt())
@@ -121,6 +121,59 @@ object DocumentQuadDetector {
       vArr[i] = (((128 * r - 107 * g - 21 * b) shr 8) + 128).coerceIn(0, 255)
     }
     return detectFromYuvGrid(yArr, uArr, vArr, gridW, gridH)
+  }
+
+  /**
+   * Resolves the highest-precision capture quad by running 320px detection AND refining any live
+   * preview [hintedQuad] against the full still-image edges so aligned borders stay dead-straight.
+   */
+  fun selectBestCaptureQuad(bitmap: Bitmap, hintedQuad: NormalizedQuad?): NormalizedQuad {
+    val targetMaxSide = 320
+    val scale = targetMaxSide.toFloat() / max(bitmap.width, bitmap.height).toFloat()
+    val gridW = max(48, (bitmap.width * scale).roundToInt())
+    val gridH = max(48, (bitmap.height * scale).roundToInt())
+    val scaled = if (bitmap.width == gridW && bitmap.height == gridH) {
+      bitmap
+    } else {
+      Bitmap.createScaledBitmap(bitmap, gridW, gridH, true)
+    }
+    val pixels = IntArray(gridW * gridH)
+    scaled.getPixels(pixels, 0, gridW, 0, 0, gridW, gridH)
+    if (scaled !== bitmap) scaled.recycle()
+
+    val yArr = IntArray(pixels.size)
+    val uArr = IntArray(pixels.size)
+    val vArr = IntArray(pixels.size)
+    for (i in pixels.indices) {
+      val c = pixels[i]
+      val r = (c ushr 16) and 0xFF
+      val g = (c ushr 8) and 0xFF
+      val b = c and 0xFF
+      yArr[i] = (77 * r + 150 * g + 29 * b) ushr 8
+      uArr[i] = (((-43 * r - 85 * g + 128 * b) shr 8) + 128).coerceIn(0, 255)
+      vArr[i] = (((128 * r - 107 * g - 21 * b) shr 8) + 128).coerceIn(0, 255)
+    }
+
+    val detected = detectFromYuvGrid(yArr, uArr, vArr, gridW, gridH)
+    if (hintedQuad == null || hintedQuad.isFullImage || !hintedQuad.isConvexValid()) {
+      return detected ?: NormalizedQuad.FULL
+    }
+
+    val refinedHint = refineQuadOnYuvGrid(hintedQuad, yArr, uArr, vArr, gridW, gridH)
+    if (detected == null) return refinedHint
+
+    // If still detection drifted far from live viewfinder lock (e.g. picked interior table rule), keep refined hint
+    val cornerDrift = maxOf(
+      hypot(detected.topLeft.x - refinedHint.topLeft.x, detected.topLeft.y - refinedHint.topLeft.y),
+      hypot(detected.topRight.x - refinedHint.topRight.x, detected.topRight.y - refinedHint.topRight.y),
+      hypot(detected.bottomRight.x - refinedHint.bottomRight.x, detected.bottomRight.y - refinedHint.bottomRight.y),
+      hypot(detected.bottomLeft.x - refinedHint.bottomLeft.x, detected.bottomLeft.y - refinedHint.bottomLeft.y),
+    )
+    return if (cornerDrift > 0.14f && refinedHint.confidence >= detected.confidence * 0.85f) {
+      refinedHint
+    } else {
+      detected
+    }
   }
 
   internal fun detectFromLumaGrid(luma: IntArray, width: Int, height: Int): NormalizedQuad? {
@@ -198,11 +251,167 @@ object DocumentQuadDetector {
     val edgeQuad = findOrientedEdgeQuad(featY, featU, featV, detailMap, gxArr, gyArr, magArr, nmsArr, width, height)
     val regionQuad = findRegionDocumentQuad(featY, featU, featV, detailMap, magArr, nmsArr, width, height)
 
-    return when {
+    val rawBest = when {
       regionQuad != null && edgeQuad != null ->
         if (edgeQuad.confidence >= regionQuad.confidence) edgeQuad else regionQuad
       else -> edgeQuad ?: regionQuad
+    } ?: return null
+
+    return refineQuadEdges(rawBest, gxArr, gyArr, magArr, nmsArr, width, height)
+  }
+
+  private fun refineQuadOnYuvGrid(
+    quad: NormalizedQuad,
+    y: IntArray,
+    u: IntArray,
+    v: IntArray,
+    width: Int,
+    height: Int,
+  ): NormalizedQuad {
+    val sharpY = boxBlur3x3(y, width, height)
+    val sharpU = boxBlur3x3(u, width, height)
+    val sharpV = boxBlur3x3(v, width, height)
+    val n = width * height
+    val gxArr = FloatArray(n)
+    val gyArr = FloatArray(n)
+    val magArr = FloatArray(n)
+
+    for (yy in 1 until height - 1) {
+      val ym1 = (yy - 1) * width
+      val y0 = yy * width
+      val yp1 = (yy + 1) * width
+      for (xx in 1 until width - 1) {
+        val (gxY, gyY) = sobelAt(sharpY, ym1, y0, yp1, xx)
+        val (gxU, gyU) = sobelAt(sharpU, ym1, y0, yp1, xx)
+        val (gxV, gyV) = sobelAt(sharpV, ym1, y0, yp1, xx)
+        val magY = sqrt(gxY * gxY + gyY * gyY)
+        val magU = sqrt(gxU * gxU + gyU * gyU) * 1.85f
+        val magV = sqrt(gxV * gxV + gyV * gyV) * 1.85f
+        val (domGx, domGy) = when {
+          magU >= magY && magU >= magV -> gxU to gyU
+          magV >= magY && magV >= magU -> gxV to gyV
+          else -> gxY to gyY
+        }
+        val sY = if (gxY * domGx + gyY * domGy >= 0f) 1f else -1f
+        val sU = if (gxU * domGx + gyU * domGy >= 0f) 1.85f else -1.85f
+        val sV = if (gxV * domGx + gyV * domGy >= 0f) 1.85f else -1.85f
+        val idx = y0 + xx
+        gxArr[idx] = gxY * sY + gxU * sU + gxV * sV
+        gyArr[idx] = gyY * sY + gyU * sU + gyV * sV
+        magArr[idx] = magY + magU + magV
+      }
     }
+    val nmsArr = nonMaxSuppression(gxArr, gyArr, magArr, width, height)
+    return refineQuadEdges(quad, gxArr, gyArr, magArr, nmsArr, width, height)
+  }
+
+  /**
+   * Snaps each of the 4 candidate quad sides onto the true oriented Sobel/NMS gradient peaks along
+   * the side normal using Total-Least-Squares line fitting, removing 1-2 degree Hough/blob skew.
+   */
+  private fun refineQuadEdges(
+    quad: NormalizedQuad,
+    gxArr: FloatArray,
+    gyArr: FloatArray,
+    magArr: FloatArray,
+    nmsArr: FloatArray,
+    width: Int,
+    height: Int,
+  ): NormalizedQuad {
+    val tl0 = NormalizedPoint(quad.topLeft.x * width, quad.topLeft.y * height)
+    val tr0 = NormalizedPoint(quad.topRight.x * width, quad.topRight.y * height)
+    val br0 = NormalizedPoint(quad.bottomRight.x * width, quad.bottomRight.y * height)
+    val bl0 = NormalizedPoint(quad.bottomLeft.x * width, quad.bottomLeft.y * height)
+
+    val cx = (tl0.x + tr0.x + br0.x + bl0.x) * 0.25f
+    val cy = (tl0.y + tr0.y + br0.y + bl0.y) * 0.25f
+    val searchR = max(3, (min(width, height) * 0.032f).roundToInt())
+
+    fun fitSideLine(a: NormalizedPoint, b: NormalizedPoint): LineEq? {
+      val ex = b.x - a.x
+      val ey = b.y - a.y
+      val len = hypot(ex, ey)
+      if (len < 12f) return null
+      var nx = -ey / len
+      var ny = ex / len
+      // Ensure normal points outward from quad center
+      val midX = (a.x + b.x) * 0.5f
+      val midY = (a.y + b.y) * 0.5f
+      if (nx * (midX - cx) + ny * (midY - cy) < 0f) {
+        nx = -nx
+        ny = -ny
+      }
+
+      val samples = 24
+      val edgePts = ArrayList<NormalizedPoint>(samples)
+      for (i in 1 until samples) {
+        val t = 0.08f + 0.84f * (i.toFloat() / samples.toFloat())
+        val bx = a.x + ex * t
+        val by = a.y + ey * t
+
+        var bestScore = 0f
+        var bestX = bx
+        var bestY = by
+        for (d in -searchR..searchR) {
+          val sx = (bx + nx * d).roundToInt()
+          val sy = (by + ny * d).roundToInt()
+          if (sx !in 2 until width - 2 || sy !in 2 until height - 2) continue
+          val idx = sy * width + sx
+          val mag = magArr[idx]
+          if (mag < 20f) continue
+          val dirMatch = abs(gxArr[idx] * nx + gyArr[idx] * ny) / (sqrt(gxArr[idx] * gxArr[idx] + gyArr[idx] * gyArr[idx]) + 1e-3f)
+          if (dirMatch < 0.50f) continue
+          val nmsBonus = if (nmsArr[idx] > 0f) 1.35f else 1f
+          val score = mag * (0.3f + 0.7f * dirMatch) * nmsBonus
+          if (score > bestScore) {
+            bestScore = score
+            bestX = sx.toFloat()
+            bestY = sy.toFloat()
+          }
+        }
+        if (bestScore > 0f) {
+          edgePts.add(NormalizedPoint(bestX, bestY))
+        }
+      }
+      if (edgePts.size < 8) return null
+      return fitRobustLine(edgePts)
+    }
+
+    fun defaultLine(a: NormalizedPoint, b: NormalizedPoint): LineEq {
+      val ex = b.x - a.x
+      val ey = b.y - a.y
+      val len = max(1f, hypot(ex, ey))
+      val nx = -ey / len
+      val ny = ex / len
+      return LineEq(nx, ny, nx * a.x + ny * a.y)
+    }
+
+    val lTop = fitSideLine(tl0, tr0) ?: defaultLine(tl0, tr0)
+    val lRight = fitSideLine(tr0, br0) ?: defaultLine(tr0, br0)
+    val lBot = fitSideLine(br0, bl0) ?: defaultLine(br0, bl0)
+    val lLeft = fitSideLine(bl0, tl0) ?: defaultLine(bl0, tl0)
+
+    val nTl = intersectLines(lTop, lLeft) ?: return quad
+    val nTr = intersectLines(lTop, lRight) ?: return quad
+    val nBr = intersectLines(lBot, lRight) ?: return quad
+    val nBl = intersectLines(lBot, lLeft) ?: return quad
+
+    val refined = NormalizedQuad(
+      topLeft = NormalizedPoint((nTl.x / width).coerceIn(0f, 1f), (nTl.y / height).coerceIn(0f, 1f)),
+      topRight = NormalizedPoint((nTr.x / width).coerceIn(0f, 1f), (nTr.y / height).coerceIn(0f, 1f)),
+      bottomRight = NormalizedPoint((nBr.x / width).coerceIn(0f, 1f), (nBr.y / height).coerceIn(0f, 1f)),
+      bottomLeft = NormalizedPoint((nBl.x / width).coerceIn(0f, 1f), (nBl.y / height).coerceIn(0f, 1f)),
+      confidence = quad.confidence,
+    )
+    if (!refined.isConvexValid(minArea = 0.04f)) return quad
+
+    val maxDrift = maxOf(
+      hypot(refined.topLeft.x - quad.topLeft.x, refined.topLeft.y - quad.topLeft.y),
+      hypot(refined.topRight.x - quad.topRight.x, refined.topRight.y - quad.topRight.y),
+      hypot(refined.bottomRight.x - quad.bottomRight.x, refined.bottomRight.y - quad.bottomRight.y),
+      hypot(refined.bottomLeft.x - quad.bottomLeft.x, refined.bottomLeft.y - quad.bottomLeft.y),
+    )
+    return if (maxDrift <= 0.055f) refined else quad
   }
 
   private fun sobelAt(arr: IntArray, ym1: Int, y0: Int, yp1: Int, xx: Int): Pair<Float, Float> {

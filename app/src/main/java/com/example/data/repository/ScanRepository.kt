@@ -66,9 +66,9 @@ class ScanRepository(
     rawTempFile.delete()
 
     val detectedQuad = run {
-      val bmp = DocumentImageProcessor.decodeSampledBitmap(rawFile.absolutePath, 320)
-      DocumentQuadDetector.detectFromBitmap(bmp).also { bmp.recycle() }
-    } ?: hintedQuad?.takeIf { it.isConvexValid() } ?: NormalizedQuad.FULL
+      val bmp = DocumentImageProcessor.decodeSampledBitmap(rawFile.absolutePath, 480)
+      DocumentQuadDetector.selectBestCaptureQuad(bmp, hintedQuad).also { bmp.recycle() }
+    }
 
     DocumentImageProcessor.applyPerspectiveCorrection(rawFile, origFile, detectedQuad)
 
@@ -111,8 +111,8 @@ class ScanRepository(
     DocumentImageProcessor.importUriToFile(context, uri, rawFile) ?: return@withContext null
 
     val detectedQuad = run {
-      val bmp = DocumentImageProcessor.decodeSampledBitmap(rawFile.absolutePath, 320)
-      DocumentQuadDetector.detectFromBitmap(bmp).also { bmp.recycle() }
+      val bmp = DocumentImageProcessor.decodeSampledBitmap(rawFile.absolutePath, 480)
+      DocumentQuadDetector.detectFromBitmap(bmp, targetMaxSide = 320).also { bmp.recycle() }
     } ?: NormalizedQuad.FULL
 
     DocumentImageProcessor.applyPerspectiveCorrection(rawFile, origFile, detectedQuad)

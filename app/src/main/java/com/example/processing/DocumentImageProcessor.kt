@@ -330,11 +330,15 @@ object DocumentImageProcessor {
     }
 
     fun smooth1D(arr: FloatArray): FloatArray {
-      val res = arr.copyOf()
-      for (i in 1 until arr.size - 1) {
-        res[i] = (arr[i - 1] + 2f * arr[i] + arr[i + 1]) * 0.25f
+      var cur = arr.copyOf()
+      repeat(2) {
+        val next = cur.copyOf()
+        for (i in 1 until cur.size - 1) {
+          next[i] = (cur[i - 1] + 2f * cur[i] + cur[i + 1]) * 0.25f
+        }
+        cur = next
       }
-      return res
+      return cur
     }
 
     val sTop = smooth1D(topArr)
@@ -342,23 +346,26 @@ object DocumentImageProcessor {
     val sLeft = smooth1D(leftArr)
     val sRight = smooth1D(rightArr)
 
-    val maxShift = maxOf(
-      sTop.maxOrNull() ?: 0f,
-      sBot.maxOrNull() ?: 0f,
-      sLeft.maxOrNull() ?: 0f,
-      sRight.maxOrNull() ?: 0f,
-    )
+    fun edgeNeedsMesh(arr: FloatArray): Boolean {
+      val nonZero = arr.count { it >= 0.014f }
+      val peak = arr.maxOrNull() ?: 0f
+      return peak >= 0.016f && nonZero >= 2
+    }
+
+    val hasRealCurve = edgeNeedsMesh(sTop) || edgeNeedsMesh(sBot) ||
+      edgeNeedsMesh(sLeft) || edgeNeedsMesh(sRight)
+
     return CurvedBorderMargins(
-      topFrac = sTop,
-      bottomFrac = sBot,
-      leftFrac = sLeft,
-      rightFrac = sRight,
-      hasAdjustment = maxShift >= 0.006f,
+      topFrac = if (edgeNeedsMesh(sTop)) sTop else zero,
+      bottomFrac = if (edgeNeedsMesh(sBot)) sBot else zero,
+      leftFrac = if (edgeNeedsMesh(sLeft)) sLeft else zero,
+      rightFrac = if (edgeNeedsMesh(sRight)) sRight else zero,
+      hasAdjustment = hasRealCurve,
     )
   }
 
   /**
-   * Cleans any remaining outer-rim (~3%) non-paper desk triangles along the document perimeter
+   * Cleans any remaining outer-rim (~2.5%) non-paper desk triangles along the document perimeter
    * after perspective warp & mesh straightening.
    */
   internal fun cleanResidualDeskCornersBuffer(
@@ -370,8 +377,8 @@ object DocumentImageProcessor {
     val paper = estimateInteriorPaperColor(argbPixels, width, height) ?: return false
     val (paperR, paperG, paperB, paperLum) = paper
 
-    val rimY = (height * 0.032f).roundToInt().coerceIn(2, 44)
-    val rimX = (width * 0.032f).roundToInt().coerceIn(2, 44)
+    val rimY = (height * 0.026f).roundToInt().coerceIn(2, 36)
+    val rimX = (width * 0.026f).roundToInt().coerceIn(2, 36)
     var modified = false
 
     for (y in 0 until height) {
@@ -471,9 +478,9 @@ object DocumentImageProcessor {
     val colorDist = abs(r - paperR) + abs(g - paperG) + abs(b - paperB)
     val chromaDiff = abs((b - r) - (paperB - paperR)) + abs((g - r) - (paperG - paperR))
     val sat = max(r, max(g, b)) - min(r, min(g, b))
-    return (colorDist > 62 && chromaDiff > 22) ||
-      (sat > 42 && colorDist > 50 && lum < paperLum - 15) ||
-      (paperLum - lum > 46 && lum < 142)
+    return (colorDist > 72 && chromaDiff > 26) ||
+      (sat > 48 && colorDist > 58 && lum < paperLum - 20) ||
+      (paperLum - lum > 68 && lum < 112)
   }
 
   suspend fun cropSourceImage(
