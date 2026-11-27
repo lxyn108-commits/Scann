@@ -781,7 +781,7 @@ object DocumentQuadDetector {
         bottomLeft = NormalizedPoint((ordered[3].x / width).coerceIn(0f, 1f), (ordered[3].y / height).coerceIn(0f, 1f)),
       )
       if (!normQuad.isConvexValid(minArea = 0.042f)) continue
-      if (normQuad.areaRatio() > 0.88f) continue
+      if (normQuad.areaRatio() > 0.96f) continue
 
       // Reject curved organic blobs (e.g. flower petals) whose boundaries do not closely fit 4 straight lines
       val straightness = measureLineStraightness(boundary, listOf(lTop, lRight, lBot, lLeft), tolPx = 2.1f)
@@ -813,6 +813,7 @@ object DocumentQuadDetector {
       // Penalize medium/small shapes that clip against the viewport boundary (flower petals / shadows)
       val clipPenalty = computeViewportClipPenalty(normQuad)
       if (minSideGrad < 0.14f && normQuad.areaRatio() < 0.60f) continue
+      if (normQuad.areaRatio() > 0.85f && minSideGrad < 0.10f) continue
 
       val centroidX = (sumX.toFloat() / compCount) / width
       val centroidY = (sumY.toFloat() / compCount) / height
@@ -972,7 +973,7 @@ object DocumentQuadDetector {
               bottomRight = NormalizedPoint((br.x / width).coerceIn(0f, 1f), (br.y / height).coerceIn(0f, 1f)),
               bottomLeft = NormalizedPoint((bl.x / width).coerceIn(0f, 1f), (bl.y / height).coerceIn(0f, 1f)),
             )
-            if (!normQuad.isConvexValid(minArea = 0.045f) || normQuad.areaRatio() > 0.88f) continue
+            if (!normQuad.isConvexValid(minArea = 0.045f) || normQuad.areaRatio() > 0.96f) continue
 
             // Score crispness along all 4 sides using NMS peaks + raw gradient magnitude
             val sTop = measureSegmentEdgeSupport(nmsArr, width, height, tl, tr, edgeThreshold * 0.7f)

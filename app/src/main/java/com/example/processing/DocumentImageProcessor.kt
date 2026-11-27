@@ -15,11 +15,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 object DocumentImageProcessor {
   private const val MAX_DIMENSION_PX = 2200
@@ -83,11 +86,13 @@ object DocumentImageProcessor {
     if (quad.isFullImage || !quad.isConvexValid(minArea = 0.04f)) {
       val flattened = straightenCurvedBordersIfNeeded(src)
       if (flattened !== src) src.recycle()
-      if (rawFile.absolutePath != destFile.absolutePath || flattened !== src) {
-        saveJpeg(flattened, destFile, 94)
+      val deskewed = deskewFineAngleIfNeeded(flattened)
+      if (deskewed !== flattened) flattened.recycle()
+      if (rawFile.absolutePath != destFile.absolutePath || deskewed !== src) {
+        saveJpeg(deskewed, destFile, 94)
       }
-      val dims = flattened.width to flattened.height
-      flattened.recycle()
+      val dims = deskewed.width to deskewed.height
+      deskewed.recycle()
       return@withContext dims
     }
 
@@ -142,11 +147,153 @@ object DocumentImageProcessor {
 
     val straightened = straightenCurvedBordersIfNeeded(warped)
     if (straightened !== warped) warped.recycle()
+    val deskewed = deskewFineAngleIfNeeded(straightened)
+    if (deskewed !== straightened) straightened.recycle()
 
-    saveJpeg(straightened, destFile, 94)
-    val dims = straightened.width to straightened.height
-    straightened.recycle()
+    saveJpeg(deskewed, destFile, 94)
+    val dims = deskewed.width to deskewed.height
+    deskewed.recycle()
     dims
+  }
+
+  /**
+   * Snaps residual slight rotational skew (-12..+12 deg) dead-level using horizontal text & table
+   * edge row-projection variance, preventing subtly crooked scans when margins are uneven.
+   */
+  private fun deskewFineAngleIfNeeded(bitmap: Bitmap): Bitmap {
+    val gw = min(220, bitmap.width).coerceAtLeast(32)
+    val gh = max(32, (gw * bitmap.height.toFloat() / max(1, bitmap.width)).roundToInt().coerceAtMost(320))
+    val thumb = if (bitmap.width == gw && bitmap.height == gh) {
+      bitmap
+    } else {
+      Bitmap.createScaledBitmap(bitmap, gw, gh, true)
+    }
+    val pixels = IntArray(gw * gh)
+    thumb.getPixels(pixels, 0, gw, 0, 0, gw, gh)
+    if (thumb !== bitmap) thumb.recycle()
+
+    val rotateDegrees = estimateFineSkewAngleDegrees(pixels, gw, gh)
+    if (abs(rotateDegrees) < 0.55f) return bitmap
+
+    val out = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(out)
+    canvas.drawColor(android.graphics.Color.WHITE)
+    val matrix = Matrix().apply {
+      postRotate(rotateDegrees, bitmap.width * 0.5f, bitmap.height * 0.5f)
+    }
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    canvas.drawBitmap(bitmap, matrix, paint)
+    return out
+  }
+
+  /**
+   * Estimates the clockwise `Matrix.postRotate` correction angle (in [-12, +12] degrees) that aligns
+   * horizontal text rows & form rules level. Returns 0f if already level or lacking horizontal lines.
+   */
+  internal fun estimateFineSkewAngleDegrees(
+    argbPixels: IntArray,
+    width: Int,
+    height: Int,
+  ): Float {
+    if (width < 24 || height < 24 || argbPixels.size < width * height) return 0f
+
+    val lums = IntArray(width * height)
+    for (i in 0 until width * height) {
+      val c = argbPixels[i]
+      lums[i] = (((c ushr 16) and 0xFF) * 77 + ((c ushr 8) and 0xFF) * 150 + (c and 0xFF) * 29) ushr 8
+    }
+
+    val maxPts = 6000
+    val ptsDx = FloatArray(maxPts)
+    val ptsDy = FloatArray(maxPts)
+    val ptsW = FloatArray(maxPts)
+    var ptCount = 0
+
+    val cx = width * 0.5f
+    val cy = height * 0.5f
+    // Ignore outer 4% border frame so edge cutoffs don't bias skew toward frame angle
+    val xStart = max(2, (width * 0.04f).roundToInt())
+    val xEnd = min(width - 2, (width * 0.96f).roundToInt())
+    val yStart = max(2, (height * 0.04f).roundToInt())
+    val yEnd = min(height - 2, (height * 0.96f).roundToInt())
+    val stride = if ((xEnd - xStart) * (yEnd - yStart) > 52000) 2 else 1
+
+    for (y in yStart until yEnd step stride) {
+      val ro = y * width
+      for (x in xStart until xEnd step stride) {
+        val dy = abs(lums[ro + width + x] - lums[ro - width + x])
+        val dx = abs(lums[ro + x + 1] - lums[ro + x - 1])
+        val hStrength = dy - (dx ushr 1)
+        if (hStrength >= 14 && ptCount < maxPts) {
+          ptsDx[ptCount] = x - cx
+          ptsDy[ptCount] = y - cy
+          ptsW[ptCount] = min(90, hStrength).toFloat()
+          ptCount++
+        }
+      }
+    }
+
+    if (ptCount < max(16, min(width, height) / 3)) return 0f
+
+    val binCount = height + 32
+    val padOffset = cy + 16f
+    val bins = FloatArray(binCount)
+    val smoothBins = FloatArray(binCount)
+
+    fun projectionScore(deg: Float): Float {
+      bins.fill(0f)
+      val rad = (deg * PI / 180.0).toFloat()
+      val sinA = sin(rad)
+      val cosA = cos(rad)
+      for (i in 0 until ptCount) {
+        val yProj = ptsDx[i] * sinA + ptsDy[i] * cosA + padOffset
+        val y0 = yProj.toInt()
+        if (y0 in 0 until binCount - 1) {
+          val frac = yProj - y0
+          val w = ptsW[i]
+          bins[y0] += w * (1f - frac)
+          bins[y0 + 1] += w * frac
+        }
+      }
+      // Smooth projection profile to eliminate 0-deg integer grid quantization bias
+      for (i in 1 until binCount - 1) {
+        smoothBins[i] = (bins[i - 1] + 2f * bins[i] + bins[i + 1]) * 0.25f
+      }
+      var score = 0f
+      for (i in 1 until binCount - 1) {
+        val b = (smoothBins[i - 1] + 2f * smoothBins[i] + smoothBins[i + 1]) * 0.25f
+        score += b * b
+      }
+      return score
+    }
+
+    val scoreZero = projectionScore(0f).coerceAtLeast(1f)
+    var bestDeg = 0f
+    var bestScore = scoreZero
+
+    var deg = -12f
+    while (deg <= 12.01f) {
+      val s = projectionScore(deg)
+      if (s > bestScore) {
+        bestScore = s
+        bestDeg = deg
+      }
+      deg += 1f
+    }
+
+    val fineCenter = bestDeg
+    var fDeg = (fineCenter - 1.2f).coerceAtLeast(-12f)
+    val fEnd = (fineCenter + 1.2f).coerceAtMost(12f)
+    while (fDeg <= fEnd + 0.01f) {
+      val s = projectionScore(fDeg)
+      if (s > bestScore) {
+        bestScore = s
+        bestDeg = fDeg
+      }
+      fDeg += 0.2f
+    }
+
+    return if (abs(bestDeg) >= 0.55f && bestScore >= scoreZero * 1.10f) bestDeg else 0f
   }
 
   /**

@@ -965,4 +965,142 @@ class SearchablePdfAndOcrTest {
     assertTrue(tags.contains("Pajak"))
     assertTrue(tags.contains("Resi"))
   }
+
+  @Test
+  fun imageProcessorPreservesEmbeddedOutdoorPhotoShadowsWhileBleachingMottledPaperAndYellowHeader() {
+    val w = 160
+    val h = 200
+    val pixels = IntArray(w * h)
+
+    // 1) Mottled noisy gray-blue paper across whole document (simulating Photo 1 ISO noise & ambient cast)
+    for (y in 0 until h) {
+      for (x in 0 until w) {
+        val mottle = ((x * 13 + y * 19) % 21) - 10
+        val shadow = if (y > 145) -14 else 0
+        val r = (206 + mottle + shadow).coerceIn(170, 232)
+        val g = (210 + mottle + shadow).coerceIn(174, 236)
+        val b = (218 + mottle + shadow).coerceIn(182, 242)
+        pixels[y * w + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+      }
+    }
+
+    // 2) Top yellow banner header
+    for (y in 12..32) {
+      for (x in 14..145) {
+        pixels[y * w + x] = (0xFF shl 24) or (236 shl 16) or (214 shl 8) or 52
+      }
+    }
+
+    // 3) Black body text lines on white paper
+    for (y in listOf(46, 56)) {
+      for (x in 20..120) {
+        pixels[y * w + x] = (0xFF shl 24) or (46 shl 16) or (46 shl 8) or 50
+        pixels[(y + 1) * w + x] = (0xFF shl 24) or (52 shl 16) or (52 shl 8) or 56
+      }
+    }
+
+    // 4) Embedded outdoor road & tree photo box (x=18..74, y=72..136) with dark asphalt & shadows
+    for (y in 72..136) {
+      for (x in 18..74) {
+        pixels[y * w + x] = when {
+          y < 88 -> (0xFF shl 24) or (148 shl 16) or (178 shl 8) or 212 // sky
+          y < 105 -> (0xFF shl 24) or (42 shl 16) or (68 shl 8) or 46  // shaded trees
+          else -> (0xFF shl 24) or (44 shl 16) or (48 shl 8) or 54    // dark asphalt road
+        }
+      }
+    }
+
+    val out = ImageProcessor().enhanceMagicColorBuffer(pixels, w, h, removeShadowAndGlare = true)
+
+    // Paper background (even in shaded bottom margin) must bleach cleanly to pure #FFFFFF
+    val paperTop = out[62 * w + 80]
+    val paperBottom = out[175 * w + 80]
+    assertEquals("Mottled paper must bleach to #FFFFFF", 0xFFFFFF, paperTop and 0xFFFFFF)
+    assertEquals("Bottom shaded mottled paper must bleach to #FFFFFF", 0xFFFFFF, paperBottom and 0xFFFFFF)
+
+    // Printed black text must stay sharp & jet black
+    val txt = out[46 * w + 60]
+    val txtLum = (((txt ushr 16) and 0xFF) * 77 + ((txt ushr 8) and 0xFF) * 150 + (txt and 0xFF) * 29) ushr 8
+    assertTrue("Body text must stay dark (lum=$txtLum)", txtLum < 55)
+
+    // Embedded outdoor dark asphalt (original lum ~47) must NOT crush to pitch-black #000000!
+    val road = out[120 * w + 46]
+    val roadR = (road ushr 16) and 0xFF
+    val roadG = (road ushr 8) and 0xFF
+    val roadB = road and 0xFF
+    val roadLum = (roadR * 77 + roadG * 150 + roadB * 29) ushr 8
+    assertTrue("Embedded road photo must remain visible, not crushed to #000000 (RGB=$roadR,$roadG,$roadB, lum=$roadLum)", roadLum >= 46)
+
+    // Yellow header must remain clean natural yellow (not whitewashed)
+    val hdr = out[22 * w + 80]
+    val hdrR = (hdr ushr 16) and 0xFF
+    val hdrG = (hdr ushr 8) and 0xFF
+    val hdrB = hdr and 0xFF
+    assertTrue("Yellow banner must stay clearly yellow (RGB=$hdrR,$hdrG,$hdrB)", hdrR >= 210 && hdrG >= 185 && hdrR - hdrB >= 120)
+  }
+
+  @Test
+  fun documentImageProcessorEstimatesFineTextSkewAngleAndIgnoresLevelText() {
+    val w = 160
+    val h = 200
+    val white = (0xFF shl 24) or (248 shl 16) or (248 shl 8) or 248
+    val black = (0xFF shl 24) or (32 shl 16) or (32 shl 8) or 32
+
+    // Case 1: Horizontal text/form rules tilted downward to the right by +3.5 deg
+    val tilted = IntArray(w * h) { white }
+    val slope = kotlin.math.tan(Math.toRadians(3.5)).toFloat()
+    for (baseY in listOf(30, 50, 70, 90, 110, 130, 150)) {
+      for (x in 16 until (w - 16)) {
+        val y = (baseY + (x - w * 0.5f) * slope).toInt()
+        if (y in 2 until h - 2) {
+          tilted[y * w + x] = black
+          tilted[(y + 1) * w + x] = black
+        }
+      }
+    }
+    val correctionDeg = DocumentImageProcessor.estimateFineSkewAngleDegrees(tilted, w, h)
+    assertTrue(
+      "Expected ~ -3.5 deg clockwise correction for +3.5 deg tilted lines (got $correctionDeg)",
+      abs(correctionDeg - (-3.5f)) < 0.85f,
+    )
+
+    // Case 2: Already dead-level horizontal lines must return 0f
+    val flat = IntArray(w * h) { white }
+    for (baseY in listOf(30, 50, 70, 90, 110, 130, 150)) {
+      for (x in 16 until (w - 16)) {
+        flat[baseY * w + x] = black
+        flat[(baseY + 1) * w + x] = black
+      }
+    }
+    val flatDeg = DocumentImageProcessor.estimateFineSkewAngleDegrees(flat, w, h)
+    assertEquals("Dead-level lines must not trigger rotation", 0f, flatDeg, 0.01f)
+  }
+
+  @Test
+  fun documentQuadDetectorFramesNearFullA4ReportWithSmallDarkCorners() {
+    val w = 120
+    val h = 160
+    val y = IntArray(w * h) { 38 } // dark table corners around A4 sheet
+    val u = IntArray(w * h) { 128 }
+    val v = IntArray(w * h) { 128 }
+
+    // Near-full-frame (~90% area) bright A4 report filling x=0.03..0.96, y=0.03..0.96 with slight 2% skew
+    for (py in 0 until h) {
+      val ny = py.toFloat() / h
+      for (px in 0 until w) {
+        val nx = px.toFloat() / w
+        val leftX = 0.025f + 0.02f * ny
+        val rightX = 0.955f + 0.02f * ny
+        val topY = 0.03f - 0.015f * nx
+        val botY = 0.96f - 0.015f * nx
+        if (nx in leftX..rightX && ny in topY..botY) {
+          y[py * w + px] = 228
+        }
+      }
+    }
+
+    val detected = DocumentQuadDetector.detectFromYuvGrid(y, u, v, w, h)
+    assertNotNull("Near-full-frame A4 sheet (~90% area) must still be detected", detected)
+    assertTrue("Detected quad must cover major area (was ${detected!!.areaRatio()})", detected.areaRatio() > 0.78f)
+  }
 }
