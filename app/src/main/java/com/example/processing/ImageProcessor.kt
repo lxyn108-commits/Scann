@@ -119,9 +119,9 @@ class ImageProcessor {
     val photoMask = computePhotoRegionMask(base, lums, width, height)
 
     val (paperWhite, inkFloor) = estimatePaperAndInkLevels(lums, photoMask)
-    val whiteCut = (paperWhite - 24f).coerceIn(196f, 229f)
-    val colorBlackFloor = inkFloor.toFloat().coerceIn(14f, 44f)
-    val textBlackFloor = max(colorBlackFloor + 6f, 42f).coerceIn(36f, whiteCut - 84f)
+    val whiteCut = (paperWhite - 36f).coerceIn(188f, 214f)
+    val colorBlackFloor = inkFloor.toFloat().coerceIn(14f, 42f)
+    val textBlackFloor = max(colorBlackFloor + 4f, 30f).coerceIn(26f, whiteCut - 84f)
     val textSpan = max(56f, whiteCut - textBlackFloor)
     val colorSpan = max(64f, whiteCut - colorBlackFloor)
 
@@ -137,10 +137,10 @@ class ImageProcessor {
       val chroma = maxC - minC
       val pWeight = photoMask[i]
 
-      // Bleaching applies strongly to neutral paper & grain; suppressed inside embedded photographs
-      val lumWeight = smoothstep(whiteCut - 16f, whiteCut + 3f, lum)
-      val lowChromaWeight = 1f - smoothstep(26f, 54f, chroma)
-      val bleachAlpha = (lumWeight * lowChromaWeight * (1f - pWeight * 0.94f)).coerceIn(0f, 1f)
+      // Bleaching applies strongly to neutral & cool-cast paper grain; suppressed inside embedded photographs
+      val lumWeight = smoothstep(whiteCut - 22f, whiteCut + 2f, lum)
+      val lowChromaWeight = 1f - smoothstep(32f, 68f, chroma)
+      val bleachAlpha = (lumWeight * lowChromaWeight * (1f - pWeight * 0.96f)).coerceIn(0f, 1f)
 
       if (bleachAlpha >= 0.995f) {
         base[i] = 0xFFFFFFFF.toInt()
@@ -148,31 +148,32 @@ class ImageProcessor {
       }
 
       // Document text/logo/banner tone curve
-      val isAchromatic = chroma < 28f
+      val isAchromatic = chroma < 34f
       val docTargetLum = if (isAchromatic) {
         val tn = ((lum - textBlackFloor) / textSpan).coerceIn(0f, 1f)
-        // Firm ink compression on dark/medium receipt strokes (<0.80) while keeping light gray boxes soft (>=0.84)
-        val gamma = 1.64f - smoothstep(0.74f, 0.90f, tn) * 0.42f
+        // Firm ink compression for receipt/body strokes (<=0.82) while lifting pale-gray caption boxes (>=0.90) cleanly
+        val gamma = 2.35f - smoothstep(0.82f, 0.92f, tn) * 1.20f
         (tn.pow(gamma) * 255f)
       } else {
         val tc = ((lum - colorBlackFloor) / colorSpan).coerceIn(0f, 1f)
         val s = tc * tc * (3f - 2f * tc)
-        lum * 0.22f + s * 255f * 0.78f
+        lum * 0.24f + s * 255f * 0.76f
       }
 
-      // Embedded natural photo tone curve: lift crushed shadows cleanly without black clipping
+      // Embedded natural photo tone curve: Oppo-style HDR shadow lift prevents pitch-black asphalt/foliage
       val photoTargetLum = if (pWeight > 0.01f) {
         val norm = (lum / 255f).coerceIn(0f, 1f)
-        val lifted = norm.pow(0.84f) * 255f
+        val lifted = norm.pow(0.68f) * 255f
         val gentleS = (norm * norm * (3f - 2f * norm)) * 255f
-        lifted * 0.78f + gentleS * 0.22f
+        val hdr = lifted * 0.82f + gentleS * 0.18f
+        max(hdr, min(72f, lum + 24f))
       } else {
         docTargetLum
       }
 
       val targetLum = docTargetLum * (1f - pWeight) + photoTargetLum * pWeight
-      val maxGain = if (pWeight > 0.3f) 1.55f else 1.42f
-      val minGain = if (pWeight > 0.3f) 0.72f else 0.12f
+      val maxGain = if (pWeight > 0.3f) 2.25f else 1.44f
+      val minGain = if (pWeight > 0.3f) 0.76f else 0.12f
       val gain = if (lum > 1f) (targetLum / lum).coerceIn(minGain, maxGain) else 1f
       var nr = r * gain
       var ng = g * gain
@@ -180,12 +181,12 @@ class ImageProcessor {
 
       val newLum = (0.299f * nr + 0.587f * ng + 0.114f * nb).coerceIn(0f, 255f)
       val docSatBoost = when {
-        chroma > 95f && lum > 170f -> 1.10f // Keep bright yellow/pastel banners natural, not neon
-        chroma > 32f -> 1.22f
-        chroma > 18f -> 1.08f
-        else -> 0.84f // Eliminate color fringing around black body text
+        chroma > 85f && lum > 165f -> 1.05f // Keep yellow banners clean & natural like flatbed scans, not neon
+        chroma > 42f -> 1.18f
+        chroma > 28f -> 0.94f // Avoid amplifying cool blue/gray ambient paper grain
+        else -> 0.65f // Strongly neutralize gray-blue shadow cast & edge fringing
       }
-      val photoSatBoost = 1.12f
+      val photoSatBoost = 1.14f
       val satBoost = docSatBoost * (1f - pWeight) + photoSatBoost * pWeight
 
       nr = newLum + (nr - newLum) * satBoost
@@ -202,7 +203,7 @@ class ImageProcessor {
       base[i] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
     }
 
-    return applyUnsharpMask(base, width, height, strength = 0.26f)
+    return applyUnsharpMask(base, width, height, strength = 0.28f)
   }
 
   internal fun enhanceGrayscaleBuffer(
@@ -222,18 +223,19 @@ class ImageProcessor {
     val lums = computeLuminanceArray(base, width, height)
     val photoMask = computePhotoRegionMask(base, lums, width, height)
     val (paperWhite, inkFloor) = estimatePaperAndInkLevels(lums, photoMask)
-    val whiteCut = (paperWhite - 23f).coerceIn(194f, 229f)
-    val textBlackFloor = max(inkFloor.toFloat() + 6f, 40f).coerceIn(34f, whiteCut - 84f)
+    val whiteCut = (paperWhite - 36f).coerceIn(188f, 214f)
+    val textBlackFloor = max(inkFloor.toFloat() + 4f, 30f).coerceIn(26f, whiteCut - 84f)
     val span = max(56f, whiteCut - textBlackFloor)
 
     for (i in 0 until width * height) {
       val lum = lums[i].toFloat()
       val pWeight = photoMask[i]
-      val bleachAlpha = smoothstep(whiteCut - 16f, whiteCut + 3f, lum) * (1f - pWeight * 0.94f)
+      val bleachAlpha = smoothstep(whiteCut - 22f, whiteCut + 2f, lum) * (1f - pWeight * 0.96f)
       val tn = ((lum - textBlackFloor) / span).coerceIn(0f, 1f)
-      val gamma = 1.56f - smoothstep(0.74f, 0.90f, tn) * 0.36f
+      val gamma = 2.25f - smoothstep(0.82f, 0.92f, tn) * 1.10f
       val docCurved = tn.pow(gamma) * 255f
-      val photoCurved = ((lum / 255f).coerceIn(0f, 1f)).pow(0.86f) * 255f
+      val photoNorm = (lum / 255f).coerceIn(0f, 1f)
+      val photoCurved = max(photoNorm.pow(0.70f) * 255f, min(72f, lum + 24f))
       val curved = docCurved * (1f - pWeight) + photoCurved * pWeight
       val outLum = (curved * (1f - bleachAlpha) + 255f * bleachAlpha)
         .roundToInt()
@@ -637,71 +639,77 @@ class ImageProcessor {
   }
 
   /**
-   * Edge-preserving selective 3x3 smoothing for bright paper, creases, and light fills (>= 145 lum):
-   * averages neighboring pixels within +-28 luma and +-24 chroma so ISO sensor noise & mottled paper
-   * grain become silky-uniform while black text edges & thin rules remain untouched.
+   * Two-pass multi-scale edge-preserving bilateral despeckler (`step=1` + sparse `step=2` covering
+   * 7x7 support) for bright paper, creases, and light fills (>= 166 lum): collapses multi-pixel
+   * smartphone ISO/JPEG blotches into silky-uniform tone while leaving `< 166` strokes razor sharp.
    */
   private fun despeckleBrightPaper(pixels: IntArray, w: Int, h: Int): IntArray {
-    if (w < 3 || h < 3) return pixels
-    val out = pixels.copyOf()
+    if (w < 5 || h < 5) return pixels
+    var cur = pixels
     val lumArr = IntArray(w * h)
     val chrArr = IntArray(w * h)
-    for (i in 0 until w * h) {
-      val c = pixels[i]
-      val r = (c ushr 16) and 0xFF
-      val g = (c ushr 8) and 0xFF
-      val b = c and 0xFF
-      lumArr[i] = (r * 77 + g * 150 + b * 29) ushr 8
-      chrArr[i] = max(r, max(g, b)) - min(r, min(g, b))
-    }
 
-    for (y in 1 until h - 1) {
-      val ym1 = (y - 1) * w
-      val y0 = y * w
-      val yp1 = (y + 1) * w
-      for (x in 1 until w - 1) {
-        val idx = y0 + x
-        val lc = lumArr[idx]
-        if (lc < 168) continue
-        val cc = chrArr[idx]
+    for (step in intArrayOf(1, 2)) {
+      val out = cur.copyOf()
+      for (i in 0 until w * h) {
+        val c = cur[i]
+        val r = (c ushr 16) and 0xFF
+        val g = (c ushr 8) and 0xFF
+        val b = c and 0xFF
+        lumArr[i] = (r * 77 + g * 150 + b * 29) ushr 8
+        chrArr[i] = max(r, max(g, b)) - min(r, min(g, b))
+      }
 
-        var sr = 0
-        var sg = 0
-        var sb = 0
-        var cnt = 0
-        for (yy in 0..2) {
-          val rowOff = when (yy) {
-            0 -> ym1
-            1 -> y0
-            else -> yp1
-          }
-          for (dx in -1..1) {
-            val nIdx = rowOff + x + dx
-            if (abs(lumArr[nIdx] - lc) <= 28 && abs(chrArr[nIdx] - cc) <= 24) {
-              val px = pixels[nIdx]
-              sr += (px ushr 16) and 0xFF
-              sg += (px ushr 8) and 0xFF
-              sb += px and 0xFF
-              cnt++
+      for (y in step until h - step) {
+        val ym = (y - step) * w
+        val y0 = y * w
+        val yp = (y + step) * w
+        for (x in step until w - step) {
+          val idx = y0 + x
+          val lc = lumArr[idx]
+          if (lc < 166) continue
+          val cc = chrArr[idx]
+
+          var sr = 0
+          var sg = 0
+          var sb = 0
+          var cnt = 0
+          for (yy in 0..2) {
+            val rowOff = when (yy) {
+              0 -> ym
+              1 -> y0
+              else -> yp
+            }
+            for (dx in -step..step step step) {
+              val nIdx = rowOff + x + dx
+              val nl = lumArr[nIdx]
+              if (nl >= 166 && abs(nl - lc) <= 28 && abs(chrArr[nIdx] - cc) <= 22) {
+                val px = cur[nIdx]
+                sr += (px ushr 16) and 0xFF
+                sg += (px ushr 8) and 0xFF
+                sb += px and 0xFF
+                cnt++
+              }
             }
           }
-        }
-        if (cnt >= 3) {
-          val ri = sr / cnt
-          val gi = sg / cnt
-          val bi = sb / cnt
-          out[idx] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+          if (cnt >= 3) {
+            val ri = sr / cnt
+            val gi = sg / cnt
+            val bi = sb / cnt
+            out[idx] = (0xFF shl 24) or (ri shl 16) or (gi shl 8) or bi
+          }
         }
       }
+      cur = out
     }
-    return out
+    return cur
   }
 
   /**
-   * Identifies embedded photo/graphic regions (`0f..1f`) on the page by measuring local neutral
-   * white-paper fraction (`lum >= 198 && chroma <= 38`) over coarse blocks. Printed text lines &
-   * tables always sit inside abundant surrounding white paper (`paperFrac >> 0.35`), whereas interior
-   * 2D blocks of outdoor/indoor photographs have almost zero white paper (`paperFrac < 0.14`).
+   * Identifies embedded photo/graphic regions (`0f..1f`) on the page by measuring local white-paper
+   * fraction vs continuous non-white content across coarse blocks, then propagates photo protection
+   * through connected bright-sky / light-building sub-blocks inside the photo frame while stopping
+   * cleanly at surrounding white A4 margins.
    */
   private fun computePhotoRegionMask(
     pixels: IntArray,
@@ -712,10 +720,11 @@ class ImageProcessor {
     val mask = FloatArray(w * h)
     if (w < 24 || h < 24) return mask
 
-    val blockSize = (min(w, h) / 20).coerceIn(5, 32)
+    val blockSize = (min(w, h) / 22).coerceIn(5, 28)
     val bw = max(3, (w + blockSize - 1) / blockSize)
     val bh = max(3, (h + blockSize - 1) / blockSize)
     val paperFrac = FloatArray(bw * bh)
+    val contentFrac = FloatArray(bw * bh)
 
     for (by in 0 until bh) {
       val py0 = by * blockSize
@@ -724,30 +733,35 @@ class ImageProcessor {
         val px0 = bx * blockSize
         val px1 = min(w, (bx + 1) * blockSize)
         var paperCnt = 0
+        var contentCnt = 0
         var total = 0
         for (yy in py0 until py1) {
           val ro = yy * w
           for (xx in px0 until px1) {
             val idx = ro + xx
             val lum = lums[idx]
-            if (lum >= 198) {
-              val c = pixels[idx]
-              val r = (c ushr 16) and 0xFF
-              val g = (c ushr 8) and 0xFF
-              val b = c and 0xFF
-              val chroma = max(r, max(g, b)) - min(r, min(g, b))
-              if (chroma <= 38) paperCnt++
+            val c = pixels[idx]
+            val r = (c ushr 16) and 0xFF
+            val g = (c ushr 8) and 0xFF
+            val b = c and 0xFF
+            val chroma = max(r, max(g, b)) - min(r, min(g, b))
+            if (lum >= 198 && chroma <= 34) {
+              paperCnt++
+            }
+            if (lum <= 186 || chroma > 34) {
+              contentCnt++
             }
             total++
           }
         }
-        paperFrac[by * bw + bx] = paperCnt.toFloat() / max(1, total).toFloat()
+        val bIdx = by * bw + bx
+        paperFrac[bIdx] = paperCnt.toFloat() / max(1, total).toFloat()
+        contentFrac[bIdx] = contentCnt.toFloat() / max(1, total).toFloat()
       }
     }
 
-    // A block belongs to a continuous photo only if part of a >= 2x2 low-paper block group
-    // (ignores 1-block-tall bold titles, table bars, or individual letters)
-    val rawPhoto = BooleanArray(bw * bh) { paperFrac[it] < 0.16f }
+    // Core photo seed: continuous >= 2x2 block region with sparse white paper & rich mid/dark/color content
+    val rawPhoto = BooleanArray(bw * bh) { i -> paperFrac[i] < 0.36f && contentFrac[i] >= 0.52f }
     val corePhoto = FloatArray(bw * bh)
     for (by in 0 until bh - 1) {
       for (bx in 0 until bw - 1) {
@@ -764,7 +778,33 @@ class ImageProcessor {
       }
     }
 
-    // Gently dilate 1 block (to cover high-contrast rim of photo boxes) and smooth for zero seam
+    // Propagate through connected sky / bright-building top halves inside the photo box
+    // (stops dead at empty white A4 margins where paperFrac >= 0.68f)
+    var grown = corePhoto.copyOf()
+    repeat(4) {
+      val next = grown.copyOf()
+      for (by in 0 until bh) {
+        val y0 = max(0, by - 1)
+        val y1 = min(bh - 1, by + 1)
+        for (bx in 0 until bw) {
+          val idx = by * bw + bx
+          if (grown[idx] > 0.5f || paperFrac[idx] >= 0.68f) continue
+          var adjCore = 0
+          for (yy in y0..y1) {
+            val ro = yy * bw
+            for (xx in max(0, bx - 1)..min(bw - 1, bx + 1)) {
+              if (grown[ro + xx] > 0.5f) adjCore++
+            }
+          }
+          if (adjCore >= 2) {
+            next[idx] = 1f
+          }
+        }
+      }
+      grown = next
+    }
+
+    // Gently blend 1-block rim for zero seam
     val dilated = FloatArray(bw * bh)
     for (by in 0 until bh) {
       val y0 = max(0, by - 1)
@@ -778,19 +818,18 @@ class ImageProcessor {
         for (yy in y0..y1) {
           val ro = yy * bw
           for (xx in x0..x1) {
-            val v = corePhoto[ro + xx]
+            val v = grown[ro + xx]
             if (v > maxV) maxV = v
             sumV += v
             cnt++
           }
         }
-        val self = corePhoto[by * bw + bx]
+        val self = grown[by * bw + bx]
         dilated[by * bw + bx] = if (self > 0.5f) {
           1f
         } else {
-          // Rim block: blend only if strongly adjacent to photo interior AND itself low in white paper
           val adj = sumV / max(1, cnt)
-          (maxV * adj * 1.4f * (1f - smoothstep(0.15f, 0.55f, paperFrac[by * bw + bx]))).coerceIn(0f, 1f)
+          (maxV * adj * 1.35f * (1f - smoothstep(0.24f, 0.70f, paperFrac[by * bw + bx]))).coerceIn(0f, 1f)
         }
       }
     }

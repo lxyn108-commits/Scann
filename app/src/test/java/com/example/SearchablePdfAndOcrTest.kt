@@ -1103,4 +1103,127 @@ class SearchablePdfAndOcrTest {
     assertNotNull("Near-full-frame A4 sheet (~90% area) must still be detected", detected)
     assertTrue("Detected quad must cover major area (was ${detected!!.areaRatio()})", detected.areaRatio() > 0.78f)
   }
+
+  @Test
+  fun documentQuadDetectorFramesFullA4WithTwoInteriorDarkPhotosAndCornerDesk() {
+    val w = 120
+    val h = 160
+    val y = IntArray(w * h) { 26 } // dark desk around tilted/edge-touching A4 report
+    val u = IntArray(w * h) { 128 }
+    val v = IntArray(w * h) { 128 }
+
+    // A4 report touching left edge (x=0.01..0.95) and tilted slightly, containing two dark interior outdoor photos
+    for (py in 0 until h) {
+      val ny = py.toFloat() / h
+      for (px in 0 until w) {
+        val nx = px.toFloat() / w
+        val leftX = 0.005f + 0.015f * ny
+        val rightX = 0.945f - 0.025f * ny
+        val topY = 0.025f + 0.018f * nx
+        val botY = 0.975f - 0.012f * nx
+        if (nx in leftX..rightX && ny in topY..botY) {
+          val idx = py * w + px
+          val inYellowHeader = ny in 0.06f..0.11f && nx in 0.08f..0.88f
+          val inLeftPhoto = nx in 0.11f..0.35f && ny in 0.30f..0.54f
+          val inMidPhoto = nx in 0.39f..0.63f && ny in 0.30f..0.54f
+          when {
+            inLeftPhoto || inMidPhoto -> {
+              y[idx] = 48
+              u[idx] = 128
+              v[idx] = 128
+            }
+            inYellowHeader -> {
+              y[idx] = 212
+              u[idx] = 64
+              v[idx] = 148
+            }
+            else -> {
+              y[idx] = 224
+              u[idx] = 128
+              v[idx] = 128
+            }
+          }
+        }
+      }
+    }
+
+    val detected = DocumentQuadDetector.detectFromYuvGrid(y, u, v, w, h)
+    assertNotNull("A4 report with interior dark photos & dark desk corners must be detected", detected)
+    assertTrue("Detected quad must cover report (area=${detected!!.areaRatio()})", detected.areaRatio() > 0.78f)
+  }
+
+  @Test
+  fun imageProcessorMatchesOppoCleanlinessOnDegradedRealBinaMargaReport() {
+    val oppoFile = listOf(
+      File("../public/assets/aistudio/pic_20261127063959_0_5ff249f6.jpg"),
+      File("public/assets/aistudio/pic_20261127063959_0_5ff249f6.jpg"),
+    ).firstOrNull { it.exists() } ?: return
+
+    val srcImg = javax.imageio.ImageIO.read(oppoFile) ?: return
+    val w = 360
+    val h = 480
+    val pixels = IntArray(w * h)
+
+    // Sample scaled image and apply realistic smartphone capture degradation:
+    // uneven directional shadow, cool blue-gray ambient cast, and 6px blotchy ISO waves
+    for (y in 0 until h) {
+      val sy = (y * srcImg.height / h).coerceIn(0, srcImg.height - 1)
+      val ny = y.toFloat() / h
+      for (x in 0 until w) {
+        val sx = (x * srcImg.width / w).coerceIn(0, srcImg.width - 1)
+        val nx = x.toFloat() / w
+        val c = srcImg.getRGB(sx, sy)
+        val r0 = (c ushr 16) and 0xFF
+        val g0 = (c ushr 8) and 0xFF
+        val b0 = c and 0xFF
+
+        val shade = 0.88f - 0.14f * ny - 0.06f * nx
+        val wave = (kotlin.math.sin(x * 0.55) * kotlin.math.cos(y * 0.45) * 14.0).toInt()
+        val dr = (r0 * shade - 22 + wave).toInt().coerceIn(8, 245)
+        val dg = (g0 * shade - 16 + wave).toInt().coerceIn(8, 245)
+        val db = (b0 * shade - 6 + wave).toInt().coerceIn(10, 248)
+        pixels[y * w + x] = (0xFF shl 24) or (dr shl 16) or (dg shl 8) or db
+      }
+    }
+
+    val out = ImageProcessor().enhanceMagicColorBuffer(pixels, w, h, removeShadowAndGlare = true)
+
+    fun regionMeanLum(x0f: Float, y0f: Float, x1f: Float, y1f: Float): Float {
+      var sum = 0L
+      var cnt = 0
+      for (yy in (y0f * h).toInt()..(y1f * h).toInt()) {
+        for (xx in (x0f * w).toInt()..(x1f * w).toInt()) {
+          val p = out[yy.coerceIn(0, h - 1) * w + xx.coerceIn(0, w - 1)]
+          val r = (p ushr 16) and 0xFF
+          val g = (p ushr 8) and 0xFF
+          val b = p and 0xFF
+          sum += (r * 77 + g * 150 + b * 29) ushr 8
+          cnt++
+        }
+      }
+      return sum.toFloat() / cnt.coerceAtLeast(1)
+    }
+
+    val topPaperLum = regionMeanLum(0.15f, 0.04f, 0.85f, 0.07f)
+    val midPaperLum = regionMeanLum(0.15f, 0.65f, 0.85f, 0.70f)
+    val botPaperLum = regionMeanLum(0.15f, 0.88f, 0.85f, 0.94f)
+    assertTrue("Top paper must bleach spotless (lum=$topPaperLum)", topPaperLum >= 251f)
+    assertTrue("Middle paper must bleach spotless (lum=$midPaperLum)", midPaperLum >= 251f)
+    assertTrue("Bottom shaded paper must bleach spotless (lum=$botPaperLum)", botPaperLum >= 250f)
+
+    // Dark asphalt road in Foto Kegiatan (lower portion of left photo) must NOT crush to black!
+    val roadLum = regionMeanLum(0.16f, 0.45f, 0.30f, 0.52f)
+    assertTrue("Outdoor asphalt road must retain visible shadow detail (lum=$roadLum)", roadLum >= 54f)
+
+    // Bright sky / building in top of Foto Km/Hm/Alat must keep natural range (not crushed or blown black)
+    val skyBuildingLum = regionMeanLum(0.42f, 0.34f, 0.56f, 0.40f)
+    assertTrue("Building/sky photo region must retain natural brightness (lum=$skyBuildingLum)", skyBuildingLum in 120f..252f)
+
+    // Yellow banner (y ~ 0.105..0.145) must keep warm yellow hue
+    val hdrPx = out[(0.125f * h).toInt() * w + (0.20f * w).toInt()]
+    val hr = (hdrPx ushr 16) and 0xFF
+    val hg = (hdrPx ushr 8) and 0xFF
+    val hb = hdrPx and 0xFF
+    assertTrue("Yellow header banner must preserve natural yellow (RGB=$hr,$hg,$hb)", hr >= 210 && hg >= 190 && hr - hb >= 95)
+  }
 }

@@ -511,20 +511,24 @@ object DocumentQuadDetector {
 
     var sumY = 0L
     var count = 0
-    for (ry in listOf(my, height - 1 - my)) {
+    for (ry in listOf(1, my, height - 1 - my, height - 2)) {
       for (step in 0..8) {
-        val x = (width * (0.06f + 0.88f * step / 8f)).roundToInt()
+        val x = (width * (0.04f + 0.92f * step / 8f)).roundToInt()
         addSample(x, ry)
-        sumY += featY[ry.coerceIn(0, height - 1) * width + x.coerceIn(0, width - 1)]
-        count++
+        if (ry == my || ry == height - 1 - my) {
+          sumY += featY[ry.coerceIn(0, height - 1) * width + x.coerceIn(0, width - 1)]
+          count++
+        }
       }
     }
-    for (rx in listOf(mx, width - 1 - mx)) {
+    for (rx in listOf(1, mx, width - 1 - mx, width - 2)) {
       for (step in 1..7) {
-        val y = (height * (0.12f + 0.76f * step / 8f)).roundToInt()
+        val y = (height * (0.08f + 0.84f * step / 8f)).roundToInt()
         addSample(rx, y)
-        sumY += featY[y.coerceIn(0, height - 1) * width + rx.coerceIn(0, width - 1)]
-        count++
+        if (rx == mx || rx == width - 1 - mx) {
+          sumY += featY[y.coerceIn(0, height - 1) * width + rx.coerceIn(0, width - 1)]
+          count++
+        }
       }
     }
     return palette to (sumY / max(1, count)).toInt()
@@ -584,14 +588,79 @@ object DocumentQuadDetector {
       masks.add(morphologicalClose3x3(BooleanArray(n) { featY[it] >= shadowPaperThresh }, width, height))
     }
 
+    // Near-full-frame A4 fallback: when dark desk corners/rims frame a large bright paper center
+    var centerPaperSum = 0L
+    var centerCnt = 0
+    for (yy in (height / 4) until (height * 3 / 4) step 2) {
+      val ro = yy * width
+      for (xx in (width / 4) until (width * 3 / 4) step 2) {
+        val py = featY[ro + xx]
+        if (py >= 140) {
+          centerPaperSum += py
+          centerCnt++
+        }
+      }
+    }
+    if (centerCnt > 8) {
+      val centerPaperY = (centerPaperSum / centerCnt).toInt()
+      var minRimY = 255
+      for (xx in 0 until width) {
+        minRimY = min(minRimY, min(featY[xx], featY[(height - 1) * width + xx]))
+      }
+      for (yy in 0 until height) {
+        minRimY = min(minRimY, min(featY[yy * width], featY[yy * width + width - 1]))
+      }
+      if (centerPaperY - minRimY >= 48) {
+        val fullSheetThresh = ((minRimY + centerPaperY) * 0.52f).roundToInt().coerceIn(85, 185)
+        masks.add(morphologicalClose3x3(BooleanArray(n) { featY[it] >= fullSheetThresh }, width, height))
+      }
+    }
+
     var bestQuad: NormalizedQuad? = null
-    for (mask in masks) {
+    for (rawMask in masks) {
+      val mask = fillInteriorHoles(rawMask, width, height)
       val candidate = extractBestQuadFromMask(mask, featY, featU, featV, detailMap, magArr, nmsArr, width, height)
       if (candidate != null && (bestQuad == null || candidate.confidence > bestQuad.confidence)) {
         bestQuad = candidate
       }
     }
     return bestQuad
+  }
+
+  private fun fillInteriorHoles(src: BooleanArray, width: Int, height: Int): BooleanArray {
+    val n = width * height
+    val exteriorBg = BooleanArray(n)
+    val queue = IntArray(n)
+    var head = 0
+    var tail = 0
+
+    fun enqueueIfBg(idx: Int) {
+      if (!src[idx] && !exteriorBg[idx]) {
+        exteriorBg[idx] = true
+        queue[tail++] = idx
+      }
+    }
+
+    for (x in 0 until width) {
+      enqueueIfBg(x)
+      enqueueIfBg((height - 1) * width + x)
+    }
+    for (y in 1 until height - 1) {
+      enqueueIfBg(y * width)
+      enqueueIfBg(y * width + width - 1)
+    }
+
+    while (head < tail) {
+      val idx = queue[head++]
+      val px = idx % width
+      val py = idx / width
+      if (px > 0) enqueueIfBg(idx - 1)
+      if (px + 1 < width) enqueueIfBg(idx + 1)
+      if (py > 0) enqueueIfBg(idx - width)
+      if (py + 1 < height) enqueueIfBg(idx + width)
+    }
+
+    return BooleanArray(n) { !exteriorBg[it] }
   }
 
   private fun morphologicalClose3x3(src: BooleanArray, width: Int, height: Int): BooleanArray {
@@ -658,7 +727,7 @@ object DocumentQuadDetector {
 
     var bestQuad: NormalizedQuad? = null
     val minCompArea = (n * 0.042f).toInt()
-    val maxCompArea = (n * 0.88f).toInt()
+    val maxCompArea = (n * 0.975f).toInt()
 
     for (start in 0 until n) {
       if (!mask[start] || visited[start]) continue
@@ -708,7 +777,7 @@ object DocumentQuadDetector {
       }
 
       if (compCount !in minCompArea..maxCompArea) continue
-      if (borderTouches > compCount * 0.20f && (maxX - minX) > width * 0.90f && (maxY - minY) > height * 0.90f) {
+      if (borderTouches > compCount * 0.36f && (maxX - minX) > width * 0.97f && (maxY - minY) > height * 0.97f) {
         continue
       }
 
@@ -781,21 +850,31 @@ object DocumentQuadDetector {
         bottomLeft = NormalizedPoint((ordered[3].x / width).coerceIn(0f, 1f), (ordered[3].y / height).coerceIn(0f, 1f)),
       )
       if (!normQuad.isConvexValid(minArea = 0.042f)) continue
-      if (normQuad.areaRatio() > 0.96f) continue
+      if (normQuad.areaRatio() > 0.975f) continue
 
       // Reject curved organic blobs (e.g. flower petals) whose boundaries do not closely fit 4 straight lines
       val straightness = measureLineStraightness(boundary, listOf(lTop, lRight, lBot, lLeft), tolPx = 2.1f)
       if (straightness < 0.72f) continue
 
-      // Measure real image edge continuity along all 4 sides (zero-clamping guard prevents fake border edges!)
+      val normPts = listOf(normQuad.topLeft, normQuad.topRight, normQuad.bottomRight, normQuad.bottomLeft)
+      fun isSideOnFrameEdge(a: NormalizedPoint, b: NormalizedPoint): Boolean =
+        (a.x <= 0.025f && b.x <= 0.025f) ||
+          (a.x >= 0.975f && b.x >= 0.975f) ||
+          (a.y <= 0.025f && b.y <= 0.025f) ||
+          (a.y >= 0.975f && b.y >= 0.975f)
+
       val sideGradients = listOf(
         measureSegmentGradient(magArr, width, height, ordered[0], ordered[1]),
         measureSegmentGradient(magArr, width, height, ordered[1], ordered[2]),
         measureSegmentGradient(magArr, width, height, ordered[2], ordered[3]),
         measureSegmentGradient(magArr, width, height, ordered[3], ordered[0]),
       )
-      val minSideGrad = sideGradients.minOrNull() ?: 0f
-      val avgSideGrad = sideGradients.average().toFloat()
+      val visibleSideIndices = (0..3).filter { idx ->
+        !isSideOnFrameEdge(normPts[idx], normPts[(idx + 1) % 4])
+      }
+      val visibleGrads = visibleSideIndices.map { sideGradients[it] }
+      val minSideGrad = (visibleGrads.minOrNull() ?: sideGradients.minOrNull() ?: 0f)
+      val avgSideGrad = (if (visibleGrads.isNotEmpty()) visibleGrads else sideGradients).average().toFloat()
       val sharpNmsSupport = listOf(
         measureSegmentEdgeSupport(nmsArr, width, height, ordered[0], ordered[1], 18f),
         measureSegmentEdgeSupport(nmsArr, width, height, ordered[1], ordered[2], 18f),
@@ -807,13 +886,20 @@ object DocumentQuadDetector {
         featY, featU, featV, width, height,
         ordered[0], ordered[1], ordered[2], ordered[3],
       )
-      val contrastScore = sideContrasts.average().toFloat()
-      if (sideContrasts.count { it >= 0.22f } < 3 && contrastScore < 0.30f) continue
+      val visibleContrasts = visibleSideIndices.map { sideContrasts[it] }
+      val contrastList = if (visibleContrasts.isNotEmpty()) visibleContrasts else sideContrasts
+      val contrastScore = contrastList.average().toFloat()
+      val isLargeRectPage = normQuad.areaRatio() > 0.70f && rectangularity >= 0.84f && straightness >= 0.78f
+      if (isLargeRectPage) {
+        if (contrastList.none { it >= 0.20f } && contrastScore < 0.24f) continue
+      } else {
+        if (sideContrasts.count { it >= 0.22f } < 3 && contrastScore < 0.30f) continue
+      }
 
       // Penalize medium/small shapes that clip against the viewport boundary (flower petals / shadows)
       val clipPenalty = computeViewportClipPenalty(normQuad)
       if (minSideGrad < 0.14f && normQuad.areaRatio() < 0.60f) continue
-      if (normQuad.areaRatio() > 0.85f && minSideGrad < 0.10f) continue
+      if (normQuad.areaRatio() > 0.85f && !isLargeRectPage && minSideGrad < 0.10f) continue
 
       val centroidX = (sumX.toFloat() / compCount) / width
       val centroidY = (sumY.toFloat() / compCount) / height

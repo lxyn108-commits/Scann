@@ -293,7 +293,7 @@ object DocumentImageProcessor {
       fDeg += 0.2f
     }
 
-    return if (abs(bestDeg) >= 0.55f && bestScore >= scoreZero * 1.10f) bestDeg else 0f
+    return if (abs(bestDeg) >= 0.50f && bestScore >= scoreZero * 1.05f) bestDeg else 0f
   }
 
   /**
